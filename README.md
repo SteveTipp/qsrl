@@ -18,10 +18,11 @@ This repository is for experimentation, not production cryptography.
 
 ## Status
 
-The first working prototype is implemented in Rust and intentionally keeps the
-archive, manifest, and signing seams easy to inspect. Where real PQ signature
-integration is not yet wired in, the code documents the gap clearly and keeps a
-clean replacement boundary.
+The first working prototype is implemented in Rust and keeps the archive,
+manifest, and signing seams easy to inspect. A real `liboqs` backend is now
+wired into the existing `src/crypto.rs` replacement boundary behind the
+`liboqs-backend` Cargo feature, while the dependency-free stub path remains
+available for offline experimentation.
 
 ## Quick start
 
@@ -32,16 +33,32 @@ cargo build
 cargo test
 ```
 
+Build and test with real `liboqs` signatures on macOS:
+
+```bash
+brew install liboqs
+export LIBOQS_DIR="$(brew --prefix liboqs)"
+export PKG_CONFIG_PATH="$LIBOQS_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+cargo test --features liboqs-backend
+```
+
 Initialize local defaults:
 
 ```bash
 cargo run -- init
 ```
 
-Generate a prototype keypair:
+Generate a keypair:
 
 ```bash
 cargo run -- keygen --alg ml-dsa
+```
+
+Generate a real `liboqs` keypair:
+
+```bash
+cargo run --features liboqs-backend -- keygen --alg ml-dsa
+cargo run --features liboqs-backend -- keygen --alg slh-dsa
 ```
 
 Pack a directory:
@@ -55,6 +72,13 @@ Sign and verify:
 ```bash
 cargo run -- sign examples/sample.qsrl --key keys/ml-dsa-001.private
 cargo run -- verify examples/sample.qsrl --pubkey keys/ml-dsa-001.public
+```
+
+Sign and verify with the real backend:
+
+```bash
+cargo run --features liboqs-backend -- sign examples/sample.qsrl --key keys/ml-dsa-001.private
+cargo run --features liboqs-backend -- verify examples/sample.qsrl --pubkey keys/ml-dsa-001.public
 ```
 
 Inspect the archive:
@@ -80,22 +104,26 @@ described in the manifest.
 
 ## Crypto backend status
 
-This repository exposes ML-DSA and SLH-DSA as the archive-level choices, but
-the current offline build uses a documented prototype-only hash-based backend
-called `stub-lamport-v1` under that interface. This keeps the archive format,
-key metadata, sign/verify flow, and protocol experiments runnable without
-claiming production security.
+Real `liboqs` support is now wired in through a minimal direct Rust-to-C FFI
+layer that preserves the current archive semantics, manifest format,
+signature-record structure, and CLI shape.
 
-Exact wiring still to do for real ML-DSA and SLH-DSA support:
+Build modes:
 
-- Add a real backend module backed by `liboqs` or a small Rust-to-C FFI shim.
-- Map `ml-dsa` and `slh-dsa` to concrete backend algorithm identifiers.
-- Replace stub key generation with real backend keypair generation.
-- Replace stub sign/verify calls while preserving the current archive and
-  signature-record interfaces.
-- Add backend-specific test vectors and compatibility checks.
+- Stub-only mode: `cargo test`
+- Real `liboqs` mode: `cargo test --features liboqs-backend`
 
-See `docs/crypto-backend.md` for the current seam and swap plan.
+Current family-to-parameter mapping in `liboqs` mode:
+
+- `ml-dsa` -> `ML-DSA-65`
+- `slh-dsa` -> `SLH_DSA_PURE_SHA2_192S`
+
+The archive manifest and CLI continue to expose the family-level choices
+`ml-dsa` and `slh-dsa`; the concrete parameter set is stored in local key
+metadata and handled inside the crypto backend.
+
+See [docs/crypto-backend.md](docs/crypto-backend.md)
+for setup steps, feature usage, and backend notes.
 
 ## Commands
 

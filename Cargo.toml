@@ -5,5 +5,13 @@ edition = "2024"
 license = "MIT"
 description = "Quantum Sealed Record Layer prototype archive/signing tool"
 repository = "local"
+build = "build.rs"
+
+[features]
+default = []
+liboqs-backend = []
 
 [dependencies]
+
+[build-dependencies]
+pkg-config = "0.3"

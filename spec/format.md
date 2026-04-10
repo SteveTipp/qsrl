@@ -80,6 +80,11 @@ detached `.qsrl.sig` files. The record contains:
 - Digest of the canonical signed payload
 - Signature bytes
 
+Current backend codes used by the prototype:
+
+- `1`: `stub-lamport-v1`
+- `2`: `liboqs-system-v1`
+
 ## Future encryption extension points
 
 QSRL does not implement encryption in this prototype. The header reserves space

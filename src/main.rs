@@ -211,7 +211,8 @@ Usage:
 
 Notes:
   - This prototype uses the QSRL names ML-DSA and SLH-DSA throughout the UX.
-  - The current offline signing backend is a documented prototype seam, not production cryptography.
+  - Default builds use the documented stub backend; use `--features liboqs-backend` for real liboqs-backed ML-DSA and SLH-DSA operations.
+  - This prototype is for experimentation, not a production security claim.
   - Archives use the .qsrl extension.
 "
     .into()

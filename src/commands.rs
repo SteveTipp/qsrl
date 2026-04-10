@@ -6,9 +6,8 @@ use crate::FORMAT_VERSION;
 use crate::archive::{Archive, PackPlan, default_detached_signature_path};
 use crate::config::RepoConfig;
 use crate::crypto::{
-    STUB_IMPLEMENTATION_CODE, STUB_IMPLEMENTATION_LABEL, generate_keypair, load_private_key,
-    load_public_key, message_digest, sign_message, verify_signature, write_private_key,
-    write_public_key,
+    KeyImplementation, generate_keypair, load_private_key, load_public_key, message_digest,
+    sign_message, verify_signature, write_private_key, write_public_key,
 };
 use crate::error::{QsrlError, Result};
 use crate::protocol::{
@@ -85,13 +84,23 @@ pub fn keygen(root: &Path, algorithm: SignatureAlgorithm) -> Result<String> {
     let public_path = keys_dir.join(format!("{key_id}.public"));
     write_private_key(&private_path, &private_key)?;
     write_public_key(&public_path, &public_key)?;
-    Ok(format!(
-        "generated prototype {} keypair\nprivate key: {}\npublic key: {}\nbackend: {}\nnote: this is a prototype-only signing seam until real ML-DSA/SLH-DSA wiring is added",
+    let mut output = format!(
+        "generated {} keypair\nprivate key: {}\npublic key: {}\nbackend: {}\nmethod: {}",
         algorithm.as_str(),
         private_path.display(),
         public_path.display(),
-        STUB_IMPLEMENTATION_LABEL,
-    ))
+        private_key.implementation_label(),
+        private_key.method_name,
+    );
+    if let Some(version) = &private_key.library_version {
+        output.push_str(&format!("\nliboqs version: {version}"));
+    }
+    if matches!(private_key.implementation, KeyImplementation::StubLamportV1) {
+        output.push_str(
+            "\nnote: this build is using the prototype stub backend; rebuild with --features liboqs-backend for real liboqs signatures",
+        );
+    }
+    Ok(output)
 }
 
 pub fn sign_archive(
@@ -117,7 +126,7 @@ pub fn sign_archive(
     let signature = SignatureRecord {
         algorithm: archive.manifest.signature_algorithm,
         scope: archive.manifest.signature_scope,
-        implementation: STUB_IMPLEMENTATION_CODE,
+        implementation: private_key.implementation_code(),
         public_key_fingerprint: private_key.public_key_fingerprint,
         signed_payload_digest: message_digest(&signed_payload),
         signature: signature_bytes,
@@ -125,11 +134,12 @@ pub fn sign_archive(
 
     private_key.uses = private_key.uses.saturating_add(1);
     write_private_key(key_path, &private_key)?;
-    let reuse_note = if private_key.uses > 1 {
-        "\nwarning: stub-lamport-v1 key reuse is allowed for workflow testing only"
-    } else {
-        ""
-    };
+    let reuse_note =
+        if private_key.implementation == KeyImplementation::StubLamportV1 && private_key.uses > 1 {
+            "\nwarning: stub-lamport-v1 key reuse is allowed for workflow testing only"
+        } else {
+            ""
+        };
 
     match placement {
         SignaturePlacement::Embedded => {
@@ -140,7 +150,7 @@ pub fn sign_archive(
                 archive_path.display(),
                 signed_payload.len(),
                 private_key.uses,
-                STUB_IMPLEMENTATION_LABEL,
+                private_key.implementation_label(),
                 reuse_note,
             ))
         }
@@ -162,7 +172,7 @@ pub fn sign_archive(
                 archive_path.display(),
                 signed_payload.len(),
                 private_key.uses,
-                STUB_IMPLEMENTATION_LABEL,
+                private_key.implementation_label(),
                 reuse_note,
             ))
         }
@@ -205,10 +215,11 @@ pub fn verify_archive(
         }
     };
 
-    if signature.implementation != STUB_IMPLEMENTATION_CODE {
-        return Err(QsrlError::UnsupportedFeature(format!(
-            "unsupported signature implementation code {}",
-            signature.implementation
+    if signature.implementation != public_key.implementation_code() {
+        return Err(QsrlError::SignatureVerificationFailed(format!(
+            "signature implementation code {} did not match the provided public key backend {}",
+            signature.implementation,
+            public_key.implementation_label()
         )));
     }
     if signature.algorithm != archive.manifest.signature_algorithm {
@@ -447,7 +458,7 @@ pub fn compare_protocols(
         .len();
 
     let report_path = output_dir.join("comparison.txt");
-    let report = format!(
+    let mut report = format!(
         "Quantum Sealed Record Layer comparison report\nrun id: {}\n\n\
 Experiment 1: embedded vs detached signatures\n\
 - embedded archive: {} bytes ({})\n\
@@ -456,7 +467,6 @@ Experiment 1: embedded vs detached signatures\n\
 - detached total: {} bytes\n\
 \n\
 Tradeoff note: embedded signatures keep a single artifact, while detached signatures leave the unsigned container bytes untouched and make signature replacement simpler.\n\
-Prototype note: the comparison harness reuses the provided stub key for convenience; that is suitable for workflow testing but not a security claim.\n\
 \n\
 Experiment 2: canonical manifest serialization\n\
 - text manifest bytes: {} ({})\n\
@@ -501,6 +511,12 @@ Tradeoff note: whole-archive compression can improve size on repetitive trees, w
         whole_elapsed.as_millis(),
         compression_whole_path.display(),
     );
+    if private_key.implementation == KeyImplementation::StubLamportV1 {
+        report = report.replace(
+            "\nExperiment 2: canonical manifest serialization\n",
+            "\nPrototype note: the comparison harness reused a stub-lamport-v1 key for convenience; that is suitable for workflow testing but not a security claim.\n\nExperiment 2: canonical manifest serialization\n",
+        );
+    }
     write_string(&report_path, &report)?;
 
     Ok(format!(

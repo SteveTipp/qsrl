@@ -49,7 +49,16 @@ fn sign_and_verify_round_trip() {
     let private_key = root.join("keys").join("ml-dsa-001.private");
     let public_key = root.join("keys").join("ml-dsa-001.public");
 
-    pack_archive(&root, &input, &archive, SettingsOverrides::default()).expect("pack archive");
+    pack_archive(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides {
+            signature_algorithm: Some(SignatureAlgorithm::MlDsa),
+            ..SettingsOverrides::default()
+        },
+    )
+    .expect("pack archive");
     sign_archive(
         &archive,
         &private_key,
@@ -60,6 +69,38 @@ fn sign_and_verify_round_trip() {
     let result = verify_archive(&archive, &public_key, None).expect("verify archive");
     assert!(result.contains("signature: ok"));
     assert!(result.contains("file hashes: ok"));
+}
+
+#[test]
+fn pack_sign_verify_round_trip_for_slh_dsa() {
+    let root = fresh_temp_dir("slh-dsa-round-trip");
+    let input = write_sample_input(&root);
+    let archive = root.join("sample-slh-dsa.qsrl");
+
+    keygen(&root, SignatureAlgorithm::SlhDsa).expect("generate SLH-DSA key");
+    let private_key = root.join("keys").join("slh-dsa-001.private");
+    let public_key = root.join("keys").join("slh-dsa-001.public");
+
+    pack_archive(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides {
+            signature_algorithm: Some(SignatureAlgorithm::SlhDsa),
+            ..SettingsOverrides::default()
+        },
+    )
+    .expect("pack archive");
+    sign_archive(
+        &archive,
+        &private_key,
+        Some(SignaturePlacement::Embedded),
+        None,
+    )
+    .expect("sign archive");
+    let result = verify_archive(&archive, &public_key, None).expect("verify archive");
+    assert!(result.contains("signature: ok"));
+    assert!(result.contains("algorithm: slh-dsa"));
 }
 
 #[test]
