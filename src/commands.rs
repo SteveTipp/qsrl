@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use crate::FORMAT_VERSION;
@@ -185,76 +186,65 @@ pub fn verify_archive(
     signature_path: Option<&Path>,
 ) -> Result<String> {
     let archive = Archive::read_from_path(archive_path)?;
-    let public_key = load_public_key(public_key_path)?;
-    if public_key.algorithm != archive.manifest.signature_algorithm {
-        return Err(QsrlError::UnsupportedAlgorithm(format!(
-            "archive expects {} but public key is {}",
-            archive.manifest.signature_algorithm.as_str(),
-            public_key.algorithm.as_str()
-        )));
-    }
-
-    let signature = match archive.manifest.signature_placement {
-        SignaturePlacement::Embedded => archive.signature.clone().ok_or_else(|| {
-            QsrlError::MissingSignature("embedded signature block is missing".into())
-        })?,
-        SignaturePlacement::Detached => {
-            let path = signature_path
-                .map(PathBuf::from)
-                .unwrap_or_else(|| default_detached_signature_path(archive_path));
-            if !path.exists() {
-                return Err(QsrlError::MissingSignature(format!(
-                    "detached signature file not found at {}",
-                    path.display()
-                )));
-            }
-            SignatureRecord::deserialize(
-                &fs::read(&path)
-                    .map_err(|err| QsrlError::io(format!("reading {}", path.display()), err))?,
-            )?
-        }
-    };
-
-    if signature.implementation != public_key.implementation_code() {
-        return Err(QsrlError::SignatureVerificationFailed(format!(
-            "signature implementation code {} did not match the provided public key backend {}",
-            signature.implementation,
-            public_key.implementation_label()
-        )));
-    }
-    if signature.algorithm != archive.manifest.signature_algorithm {
-        return Err(QsrlError::SignatureVerificationFailed(
-            "signature algorithm does not match archive manifest".into(),
-        ));
-    }
-    if signature.scope != archive.manifest.signature_scope {
-        return Err(QsrlError::SignatureVerificationFailed(
-            "signature scope does not match archive manifest".into(),
-        ));
-    }
-    if signature.public_key_fingerprint != public_key.fingerprint {
-        return Err(QsrlError::SignatureVerificationFailed(
-            "public key fingerprint did not match the signature record".into(),
-        ));
-    }
-
-    let signed_payload = archive.signed_payload()?;
-    let expected_digest = message_digest(&signed_payload);
-    if expected_digest != signature.signed_payload_digest {
-        return Err(QsrlError::SignatureVerificationFailed(
-            "signed payload digest did not match the canonical archive state".into(),
-        ));
-    }
-    verify_signature(&public_key, &signed_payload, &signature.signature)?;
+    let signature_status =
+        verify_archive_signature(&archive, archive_path, public_key_path, signature_path)?;
     archive.verify_file_hashes()?;
 
     Ok(format!(
-        "verified {}\nsignature: ok\nfile hashes: ok\nfiles checked: {}\nplacement: {}\nalgorithm: {}",
+        "verified {}\n{}\nfile hashes: ok\nfiles checked: {}\nplacement: {}\nalgorithm: {}",
         archive_path.display(),
+        signature_status,
         archive.manifest.files.len(),
         archive.manifest.signature_placement.as_str(),
         archive.manifest.signature_algorithm.as_str(),
     ))
+}
+
+pub fn extract_archive(
+    archive_path: &Path,
+    output_dir: &Path,
+    public_key_path: Option<&Path>,
+    signature_path: Option<&Path>,
+) -> Result<String> {
+    let archive = Archive::read_from_path(archive_path)?;
+    let signature_status = if let Some(public_key_path) = public_key_path {
+        Some(verify_archive_signature(
+            &archive,
+            archive_path,
+            public_key_path,
+            signature_path,
+        )?)
+    } else if archive.signature.is_some()
+        || archive.manifest.signature_placement == SignaturePlacement::Detached
+    {
+        Some("signature: not checked (no --pubkey provided)".into())
+    } else {
+        None
+    };
+
+    let files = archive.extract_files()?;
+    archive.verify_decoded_files(&files)?;
+    let relative_paths = planned_output_paths(&archive, output_dir)?;
+
+    fs::create_dir_all(output_dir)
+        .map_err(|err| QsrlError::io(format!("creating {}", output_dir.display()), err))?;
+
+    for (relative_path, data) in relative_paths.iter().zip(files.iter()) {
+        let destination = output_dir.join(relative_path);
+        ensure_parent_dir(&destination)?;
+        fs::write(&destination, data)
+            .map_err(|err| QsrlError::io(format!("writing {}", destination.display()), err))?;
+    }
+
+    let mut output = format!(
+        "extracted {} files to {}\nfile hashes: ok",
+        archive.manifest.files.len(),
+        output_dir.display()
+    );
+    if let Some(status) = signature_status {
+        output.push_str(&format!("\n{status}"));
+    }
+    Ok(output)
 }
 
 pub fn inspect_archive(archive_path: &Path) -> Result<String> {
@@ -577,4 +567,138 @@ fn next_key_id(keys_dir: &Path, algorithm: SignatureAlgorithm) -> Result<String>
         }
     }
     Ok(format!("{}-{:03}", algorithm.as_str(), next_index))
+}
+
+fn verify_archive_signature(
+    archive: &Archive,
+    archive_path: &Path,
+    public_key_path: &Path,
+    signature_path: Option<&Path>,
+) -> Result<String> {
+    let public_key = load_public_key(public_key_path)?;
+    if public_key.algorithm != archive.manifest.signature_algorithm {
+        return Err(QsrlError::UnsupportedAlgorithm(format!(
+            "archive expects {} but public key is {}",
+            archive.manifest.signature_algorithm.as_str(),
+            public_key.algorithm.as_str()
+        )));
+    }
+
+    let signature = load_signature_record(archive, archive_path, signature_path)?;
+    if signature.implementation != public_key.implementation_code() {
+        return Err(QsrlError::SignatureVerificationFailed(format!(
+            "signature implementation code {} did not match the provided public key backend {}",
+            signature.implementation,
+            public_key.implementation_label()
+        )));
+    }
+    if signature.algorithm != archive.manifest.signature_algorithm {
+        return Err(QsrlError::SignatureVerificationFailed(
+            "signature algorithm does not match archive manifest".into(),
+        ));
+    }
+    if signature.scope != archive.manifest.signature_scope {
+        return Err(QsrlError::SignatureVerificationFailed(
+            "signature scope does not match archive manifest".into(),
+        ));
+    }
+    if signature.public_key_fingerprint != public_key.fingerprint {
+        return Err(QsrlError::SignatureVerificationFailed(
+            "public key fingerprint did not match the signature record".into(),
+        ));
+    }
+
+    let signed_payload = archive.signed_payload()?;
+    let expected_digest = message_digest(&signed_payload);
+    if expected_digest != signature.signed_payload_digest {
+        return Err(QsrlError::SignatureVerificationFailed(
+            "signed payload digest did not match the canonical archive state".into(),
+        ));
+    }
+    verify_signature(&public_key, &signed_payload, &signature.signature)?;
+    Ok("signature: ok".into())
+}
+
+fn load_signature_record(
+    archive: &Archive,
+    archive_path: &Path,
+    signature_path: Option<&Path>,
+) -> Result<SignatureRecord> {
+    match archive.manifest.signature_placement {
+        SignaturePlacement::Embedded => archive.signature.clone().ok_or_else(|| {
+            QsrlError::MissingSignature("embedded signature block is missing".into())
+        }),
+        SignaturePlacement::Detached => {
+            let path = signature_path
+                .map(PathBuf::from)
+                .unwrap_or_else(|| default_detached_signature_path(archive_path));
+            if !path.exists() {
+                return Err(QsrlError::MissingSignature(format!(
+                    "detached signature file not found at {}",
+                    path.display()
+                )));
+            }
+            SignatureRecord::deserialize(
+                &fs::read(&path)
+                    .map_err(|err| QsrlError::io(format!("reading {}", path.display()), err))?,
+            )
+        }
+    }
+}
+
+fn planned_output_paths(archive: &Archive, output_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::with_capacity(archive.manifest.files.len());
+    let mut seen = BTreeSet::new();
+
+    for entry in &archive.manifest.files {
+        let relative = safe_output_relative_path(&entry.path)?;
+        if !seen.insert(relative.clone()) {
+            return Err(QsrlError::InvalidFormat(format!(
+                "archive contains duplicate extraction path '{}'",
+                relative.display()
+            )));
+        }
+
+        let destination = output_dir.join(&relative);
+        if !destination.starts_with(output_dir) {
+            return Err(QsrlError::InvalidFormat(format!(
+                "archive path '{}' would escape the output directory",
+                entry.path
+            )));
+        }
+        paths.push(relative);
+    }
+
+    Ok(paths)
+}
+
+fn safe_output_relative_path(path_text: &str) -> Result<PathBuf> {
+    if path_text.contains('\\') {
+        return Err(QsrlError::InvalidFormat(format!(
+            "archive path '{}' is not normalized for extraction",
+            path_text
+        )));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path_text).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(QsrlError::InvalidFormat(format!(
+                    "archive path '{}' would escape the output directory",
+                    path_text
+                )));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(QsrlError::InvalidFormat(
+            "archive contains an empty extraction path".into(),
+        ));
+    }
+
+    Ok(normalized)
 }

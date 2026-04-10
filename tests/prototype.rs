@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use qsrl::archive::Archive;
-use qsrl::commands::{SettingsOverrides, keygen, pack_archive, sign_archive, verify_archive};
+use qsrl::commands::{
+    SettingsOverrides, extract_archive, keygen, pack_archive, sign_archive, verify_archive,
+};
 use qsrl::error::QsrlError;
-use qsrl::protocol::{SignatureAlgorithm, SignaturePlacement};
+use qsrl::protocol::{CompressionLayout, CompressionMode, SignatureAlgorithm, SignaturePlacement};
 
 fn fresh_temp_dir(label: &str) -> PathBuf {
     let dir = env::temp_dir().join(format!("qsrl-test-{label}-{}", qsrl::util::unique_id()));
@@ -19,6 +22,29 @@ fn write_sample_input(root: &Path) -> PathBuf {
     fs::write(input.join("a.txt"), b"alpha").expect("write a.txt");
     fs::write(input.join("nested").join("b.txt"), b"beta beta beta").expect("write b.txt");
     input
+}
+
+fn read_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn visit(root: &Path, current: &Path, output: &mut BTreeMap<String, Vec<u8>>) {
+        for entry in fs::read_dir(current).expect("read tree entry") {
+            let entry = entry.expect("read dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, output);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("path inside root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                output.insert(relative, fs::read(&path).expect("read file"));
+            }
+        }
+    }
+
+    let mut output = BTreeMap::new();
+    visit(root, root, &mut output);
+    output
 }
 
 #[test]
@@ -101,6 +127,164 @@ fn pack_sign_verify_round_trip_for_slh_dsa() {
     let result = verify_archive(&archive, &public_key, None).expect("verify archive");
     assert!(result.contains("signature: ok"));
     assert!(result.contains("algorithm: slh-dsa"));
+}
+
+#[test]
+fn extract_round_trip_from_signed_archive() {
+    let root = fresh_temp_dir("extract-round-trip");
+    let input = write_sample_input(&root);
+    let archive = root.join("extract.qsrl");
+    let output = root.join("extracted");
+
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate key");
+    let private_key = root.join("keys").join("ml-dsa-001.private");
+    let public_key = root.join("keys").join("ml-dsa-001.public");
+
+    pack_archive(&root, &input, &archive, SettingsOverrides::default()).expect("pack archive");
+    sign_archive(
+        &archive,
+        &private_key,
+        Some(SignaturePlacement::Embedded),
+        None,
+    )
+    .expect("sign archive");
+
+    let result =
+        extract_archive(&archive, &output, Some(&public_key), None).expect("extract archive");
+    assert!(result.contains("signature: ok"));
+    assert_eq!(read_tree(&input), read_tree(&output));
+}
+
+#[test]
+fn extract_round_trip_with_detached_signature() {
+    let root = fresh_temp_dir("extract-detached");
+    let input = write_sample_input(&root);
+    let archive = root.join("extract-detached.qsrl");
+    let output = root.join("extracted-detached");
+    let detached_signature = root.join("extract-detached.sig");
+
+    keygen(&root, SignatureAlgorithm::SlhDsa).expect("generate key");
+    let private_key = root.join("keys").join("slh-dsa-001.private");
+    let public_key = root.join("keys").join("slh-dsa-001.public");
+
+    pack_archive(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides {
+            signature_algorithm: Some(SignatureAlgorithm::SlhDsa),
+            signature_placement: Some(SignaturePlacement::Detached),
+            ..SettingsOverrides::default()
+        },
+    )
+    .expect("pack archive");
+    sign_archive(
+        &archive,
+        &private_key,
+        Some(SignaturePlacement::Detached),
+        Some(&detached_signature),
+    )
+    .expect("sign archive");
+
+    let result = extract_archive(
+        &archive,
+        &output,
+        Some(&public_key),
+        Some(&detached_signature),
+    )
+    .expect("extract archive");
+    assert!(result.contains("signature: ok"));
+    assert_eq!(read_tree(&input), read_tree(&output));
+}
+
+#[test]
+fn extract_round_trip_for_per_file_rle_layout() {
+    let root = fresh_temp_dir("extract-rle-per-file");
+    let input = write_sample_input(&root);
+    let archive = root.join("extract-per-file.qsrl");
+    let output = root.join("extracted-per-file");
+
+    pack_archive(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides {
+            compression_mode: Some(CompressionMode::Rle),
+            compression_layout: Some(CompressionLayout::PerFile),
+            ..SettingsOverrides::default()
+        },
+    )
+    .expect("pack archive");
+
+    extract_archive(&archive, &output, None, None).expect("extract archive");
+    assert_eq!(read_tree(&input), read_tree(&output));
+}
+
+#[test]
+fn extract_round_trip_for_whole_archive_rle_layout() {
+    let root = fresh_temp_dir("extract-rle-whole");
+    let input = write_sample_input(&root);
+    let archive = root.join("extract-whole.qsrl");
+    let output = root.join("extracted-whole");
+
+    pack_archive(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides {
+            compression_mode: Some(CompressionMode::Rle),
+            compression_layout: Some(CompressionLayout::WholeArchive),
+            ..SettingsOverrides::default()
+        },
+    )
+    .expect("pack archive");
+
+    extract_archive(&archive, &output, None, None).expect("extract archive");
+    assert_eq!(read_tree(&input), read_tree(&output));
+}
+
+#[test]
+fn extract_rejects_path_traversal() {
+    let root = fresh_temp_dir("extract-traversal");
+    let input = write_sample_input(&root);
+    let archive_path = root.join("traversal.qsrl");
+    let output = root.join("extracted");
+
+    pack_archive(&root, &input, &archive_path, SettingsOverrides::default()).expect("pack archive");
+
+    let mut archive = Archive::read_from_path(&archive_path).expect("read archive");
+    archive.manifest.files[0].path = "../escape.txt".into();
+    archive.manifest_bytes = archive.manifest.serialize().expect("serialize manifest");
+    archive
+        .write_to_path(&archive_path)
+        .expect("rewrite archive");
+
+    let error =
+        extract_archive(&archive_path, &output, None, None).expect_err("extract should fail");
+    assert!(matches!(error, QsrlError::InvalidFormat(_)));
+    assert!(!output.exists());
+    assert!(!root.join("escape.txt").exists());
+}
+
+#[test]
+fn extract_rejects_corruption_before_writing() {
+    let root = fresh_temp_dir("extract-corruption");
+    let input = write_sample_input(&root);
+    let archive_path = root.join("corrupt-extract.qsrl");
+    let output = root.join("extracted");
+
+    pack_archive(&root, &input, &archive_path, SettingsOverrides::default()).expect("pack archive");
+
+    let archive = Archive::read_from_path(&archive_path).expect("read archive");
+    let mut bytes = fs::read(&archive_path).expect("read archive bytes");
+    let payload_offset = archive.payload_offset();
+    bytes[payload_offset] ^= 0x01;
+    fs::write(&archive_path, bytes).expect("rewrite archive");
+
+    let error =
+        extract_archive(&archive_path, &output, None, None).expect_err("extract should fail");
+    assert!(matches!(error, QsrlError::DataCorruption(_)));
+    assert!(!output.exists());
 }
 
 #[test]

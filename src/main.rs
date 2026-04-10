@@ -3,8 +3,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use qsrl::commands::{
-    SettingsOverrides, compare_protocols, init_repo, inspect_archive, keygen, pack_archive,
-    sign_archive, verify_archive,
+    SettingsOverrides, compare_protocols, extract_archive, init_repo, inspect_archive, keygen,
+    pack_archive, sign_archive, verify_archive,
 };
 use qsrl::error::{QsrlError, Result};
 use qsrl::protocol::{
@@ -77,6 +77,19 @@ fn run() -> Result<String> {
             let public_key_path = parsed.required_path(["--pubkey"])?;
             let signature_path = parsed.optional_path(["--sig"])?;
             verify_archive(&archive_path, &public_key_path, signature_path.as_deref())
+        }
+        "extract" => {
+            let archive_path =
+                PathBuf::from(parsed.required_positional(0, "extract requires <archive.qsrl>")?);
+            let output_path = parsed.required_path(["-o", "--output"])?;
+            let public_key_path = parsed.optional_path(["--pubkey"])?;
+            let signature_path = parsed.optional_path(["--sig"])?;
+            extract_archive(
+                &archive_path,
+                &output_path,
+                public_key_path.as_deref(),
+                signature_path.as_deref(),
+            )
         }
         "inspect" => {
             let archive_path =
@@ -206,6 +219,7 @@ Usage:
   qsrl keygen --alg ml-dsa|slh-dsa
   qsrl sign <archive.qsrl> --key <private_key> [--placement embedded|detached] [--sig <signature.sig>]
   qsrl verify <archive.qsrl> --pubkey <public_key> [--sig <signature.sig>]
+  qsrl extract <archive.qsrl> -o <output_dir> [--pubkey <public_key>] [--sig <signature.sig>]
   qsrl inspect <archive.qsrl>
   qsrl compare <input_path> -o <output_dir> --key <private_key>
 

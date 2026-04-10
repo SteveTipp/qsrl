@@ -74,6 +74,18 @@ cargo run -- sign examples/sample.qsrl --key keys/ml-dsa-001.private
 cargo run -- verify examples/sample.qsrl --pubkey keys/ml-dsa-001.public
 ```
 
+Extract the archive back to a directory:
+
+```bash
+cargo run -- extract examples/sample.qsrl -o examples/unpacked --pubkey keys/ml-dsa-001.public
+```
+
+For detached signatures, pass the sibling signature file explicitly:
+
+```bash
+cargo run -- extract examples/sample-detached.qsrl -o examples/unpacked-detached --pubkey keys/ml-dsa-001.public --sig examples/sample-detached.qsrl.sig
+```
+
 Sign and verify with the real backend:
 
 ```bash
@@ -133,6 +145,7 @@ for setup steps, feature usage, and backend notes.
 - `qsrl keygen --alg slh-dsa`
 - `qsrl sign <archive.qsrl> --key <private_key>`
 - `qsrl verify <archive.qsrl> --pubkey <public_key>`
+- `qsrl extract <archive.qsrl> -o <output_dir>`
 - `qsrl inspect <archive.qsrl>`
 - `qsrl compare <input_path> -o <output_dir> --key <private_key>`
 

@@ -253,6 +253,18 @@ impl Archive {
 
     pub fn verify_file_hashes(&self) -> Result<()> {
         let files = self.extract_files()?;
+        self.verify_decoded_files(&files)
+    }
+
+    pub fn verify_decoded_files(&self, files: &[Vec<u8>]) -> Result<()> {
+        if files.len() != self.manifest.files.len() {
+            return Err(QsrlError::InvalidFormat(format!(
+                "decoded {} files but manifest lists {}",
+                files.len(),
+                self.manifest.files.len()
+            )));
+        }
+
         for ((entry, data), block) in self
             .manifest
             .files
