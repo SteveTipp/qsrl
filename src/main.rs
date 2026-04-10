@@ -3,13 +3,14 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use qsrl::commands::{
-    SettingsOverrides, compare_protocols, extract_archive, init_repo, inspect_archive, keygen,
-    pack_archive, sign_archive, verify_archive,
+    SettingsOverrides, compare_protocols, extract_archive_with_recipient, init_repo,
+    inspect_archive, keygen, pack_archive_with_recipients, recipient_keygen, sign_archive,
+    verify_archive,
 };
 use qsrl::error::{QsrlError, Result};
 use qsrl::protocol::{
-    CompressionLayout, CompressionMode, ManifestEncoding, SignatureAlgorithm, SignaturePlacement,
-    SignatureScope,
+    CompressionLayout, CompressionMode, KemAlgorithm, ManifestEncoding, SignatureAlgorithm,
+    SignaturePlacement, SignatureScope,
 };
 
 fn main() {
@@ -44,16 +45,22 @@ fn run() -> Result<String> {
         "pack" => {
             let input_path = parsed.required_positional(0, "pack requires <input_path>")?;
             let output_path = parsed.required_path(["-o", "--output"])?;
-            pack_archive(
+            let recipient_key_paths = parsed.paths(["--recipient"])?;
+            pack_archive_with_recipients(
                 &cwd,
                 Path::new(input_path),
                 &output_path,
                 parsed.settings_overrides()?,
+                &recipient_key_paths,
             )
         }
         "keygen" => {
             let algorithm = SignatureAlgorithm::from_str(parsed.required_value(["--alg"])?)?;
             keygen(&cwd, algorithm)
+        }
+        "recipient-keygen" => {
+            let algorithm = KemAlgorithm::from_str(parsed.required_value(["--alg"])?)?;
+            recipient_keygen(&cwd, algorithm)
         }
         "sign" => {
             let archive_path =
@@ -84,11 +91,13 @@ fn run() -> Result<String> {
             let output_path = parsed.required_path(["-o", "--output"])?;
             let public_key_path = parsed.optional_path(["--pubkey"])?;
             let signature_path = parsed.optional_path(["--sig"])?;
-            extract_archive(
+            let recipient_key_path = parsed.optional_path(["--recipient-key"])?;
+            extract_archive_with_recipient(
                 &archive_path,
                 &output_path,
                 public_key_path.as_deref(),
                 signature_path.as_deref(),
+                recipient_key_path.as_deref(),
             )
         }
         "inspect" => {
@@ -113,13 +122,13 @@ fn run() -> Result<String> {
 #[derive(Debug)]
 struct ParsedArgs {
     positionals: Vec<String>,
-    options: BTreeMap<String, String>,
+    options: BTreeMap<String, Vec<String>>,
 }
 
 impl ParsedArgs {
     fn parse(args: &[String]) -> Result<Self> {
         let mut positionals = Vec::new();
-        let mut options = BTreeMap::new();
+        let mut options: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut index = 0usize;
         while index < args.len() {
             let arg = &args[index];
@@ -130,7 +139,7 @@ impl ParsedArgs {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| QsrlError::Usage(format!("missing value for option '{arg}'")))?;
-                options.insert(arg.clone(), value.clone());
+                options.entry(arg.clone()).or_default().push(value.clone());
                 index += 2;
             } else {
                 positionals.push(arg.clone());
@@ -154,7 +163,8 @@ impl ParsedArgs {
     fn optional_value<const N: usize>(&self, names: [&str; N]) -> Result<Option<&str>> {
         Ok(names
             .iter()
-            .find_map(|name| self.options.get(*name).map(String::as_str)))
+            .find_map(|name| self.options.get(*name).and_then(|values| values.first()))
+            .map(String::as_str))
     }
 
     fn required_value<const N: usize>(&self, names: [&str; N]) -> Result<&str> {
@@ -169,6 +179,17 @@ impl ParsedArgs {
 
     fn optional_path<const N: usize>(&self, names: [&str; N]) -> Result<Option<PathBuf>> {
         Ok(self.optional_value(names)?.map(PathBuf::from))
+    }
+
+    fn paths<const N: usize>(&self, names: [&str; N]) -> Result<Vec<PathBuf>> {
+        Ok(names
+            .iter()
+            .find_map(|name| self.options.get(*name))
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
     }
 
     fn settings_overrides(&self) -> Result<SettingsOverrides> {
@@ -215,17 +236,18 @@ Quantum Sealed Record Layer (QSRL)
 
 Usage:
   qsrl init [--alg ml-dsa|slh-dsa] [--placement embedded|detached] [--scope manifest|manifest+block-table] [--manifest-encoding text-v1|binary-v1] [--compression none|rle] [--compression-layout per-file|whole-archive]
-  qsrl pack <input_path> -o <archive.qsrl> [--alg ml-dsa|slh-dsa] [--placement embedded|detached] [--scope manifest|manifest+block-table] [--manifest-encoding text-v1|binary-v1] [--compression none|rle] [--compression-layout per-file|whole-archive]
+  qsrl pack <input_path> -o <archive.qsrl> [--alg ml-dsa|slh-dsa] [--placement embedded|detached] [--scope manifest|manifest+block-table] [--manifest-encoding text-v1|binary-v1] [--compression none|rle] [--compression-layout per-file|whole-archive] [--recipient <recipient_public_key>]...
   qsrl keygen --alg ml-dsa|slh-dsa
+  qsrl recipient-keygen --alg ml-kem
   qsrl sign <archive.qsrl> --key <private_key> [--placement embedded|detached] [--sig <signature.sig>]
   qsrl verify <archive.qsrl> --pubkey <public_key> [--sig <signature.sig>]
-  qsrl extract <archive.qsrl> -o <output_dir> [--pubkey <public_key>] [--sig <signature.sig>]
+  qsrl extract <archive.qsrl> -o <output_dir> [--pubkey <public_key>] [--sig <signature.sig>] [--recipient-key <private_key>]
   qsrl inspect <archive.qsrl>
   qsrl compare <input_path> -o <output_dir> --key <private_key>
 
 Notes:
   - This prototype uses the QSRL names ML-DSA and SLH-DSA throughout the UX.
-  - Default builds use the documented stub backend; use `--features liboqs-backend` for real liboqs-backed ML-DSA and SLH-DSA operations.
+  - Default builds use the documented stub backend; use `--features liboqs-backend` for real liboqs-backed ML-DSA, SLH-DSA, and ML-KEM operations.
   - This prototype is for experimentation, not a production security claim.
   - Archives use the .qsrl extension.
 "

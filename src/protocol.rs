@@ -9,6 +9,10 @@ const MANIFEST_BINARY_MAGIC: &[u8; 4] = b"QMAN";
 const BLOCK_TABLE_MAGIC: &[u8; 4] = b"QBLK";
 const ARCHIVE_MAGIC: &[u8; 4] = b"QSRL";
 const SIGNATURE_MAGIC: &[u8; 4] = b"QSIG";
+const ENCRYPTION_MAGIC: &[u8; 4] = b"QENC";
+
+pub const ARCHIVE_FLAG_EMBEDDED_SIGNATURE: u8 = 0x01;
+pub const ARCHIVE_FLAG_ENCRYPTED_PAYLOAD: u8 = 0x02;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SignatureAlgorithm {
@@ -262,6 +266,71 @@ impl CompressionLayout {
             2 => Ok(Self::WholeArchive),
             other => Err(QsrlError::Parse(format!(
                 "unsupported compression layout code {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KemAlgorithm {
+    MlKem,
+}
+
+impl KemAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MlKem => "ml-kem",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "ml-kem" => Ok(Self::MlKem),
+            other => Err(QsrlError::UnsupportedAlgorithm(format!(
+                "unsupported KEM algorithm '{other}'"
+            ))),
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            Self::MlKem => 1,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Result<Self> {
+        match code {
+            1 => Ok(Self::MlKem),
+            other => Err(QsrlError::UnsupportedAlgorithm(format!(
+                "unsupported KEM algorithm code {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AeadAlgorithm {
+    Aes256Gcm,
+}
+
+impl AeadAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aes256Gcm => "aes-256-gcm",
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Aes256Gcm => 1,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Result<Self> {
+        match code {
+            1 => Ok(Self::Aes256Gcm),
+            other => Err(QsrlError::UnsupportedAlgorithm(format!(
+                "unsupported AEAD algorithm code {other}"
             ))),
         }
     }
@@ -817,6 +886,191 @@ pub struct SignatureRecord {
     pub public_key_fingerprint: [u8; 32],
     pub signed_payload_digest: [u8; 32],
     pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientRecord {
+    pub implementation: u8,
+    pub public_key_fingerprint: [u8; 32],
+    pub kem_ciphertext: Vec<u8>,
+    pub wrap_nonce: Vec<u8>,
+    pub wrapped_key: Vec<u8>,
+    pub wrap_tag: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncryptionSection {
+    pub kem_algorithm: KemAlgorithm,
+    pub kem_method_name: String,
+    pub aead_algorithm: AeadAlgorithm,
+    pub payload_nonce: Vec<u8>,
+    pub payload_tag: Vec<u8>,
+    pub recipients: Vec<RecipientRecord>,
+}
+
+impl EncryptionSection {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        let mut output = self.aad_bytes()?;
+        output.extend_from_slice(&self.payload_tag);
+        Ok(output)
+    }
+
+    pub fn aad_bytes(&self) -> Result<Vec<u8>> {
+        let method_name = self.kem_method_name.as_bytes();
+        if method_name.len() > u16::MAX as usize {
+            return Err(QsrlError::UnsupportedFeature(
+                "KEM method name is too long for prototype encoding".into(),
+            ));
+        }
+        if self.recipients.len() > u32::MAX as usize {
+            return Err(QsrlError::UnsupportedFeature(
+                "too many recipient records for prototype encoding".into(),
+            ));
+        }
+        if self.payload_nonce.len() > u8::MAX as usize || self.payload_tag.len() > u8::MAX as usize
+        {
+            return Err(QsrlError::UnsupportedFeature(
+                "AEAD nonce or tag is too long for prototype encoding".into(),
+            ));
+        }
+
+        let mut output = Vec::new();
+        output.extend_from_slice(ENCRYPTION_MAGIC);
+        push_u16_le(&mut output, 1);
+        output.push(self.kem_algorithm.code());
+        output.push(self.aead_algorithm.code());
+        output.push(self.payload_nonce.len() as u8);
+        output.push(self.payload_tag.len() as u8);
+        push_u32_le(&mut output, self.recipients.len() as u32);
+        push_u16_le(&mut output, method_name.len() as u16);
+        output.extend_from_slice(&[0u8; 2]);
+        output.extend_from_slice(method_name);
+        output.extend_from_slice(&self.payload_nonce);
+        for recipient in &self.recipients {
+            if recipient.kem_ciphertext.len() > u32::MAX as usize
+                || recipient.wrapped_key.len() > u32::MAX as usize
+                || recipient.wrap_nonce.len() > u8::MAX as usize
+                || recipient.wrap_tag.len() > u8::MAX as usize
+            {
+                return Err(QsrlError::UnsupportedFeature(
+                    "recipient record is too large for prototype encoding".into(),
+                ));
+            }
+            output.push(recipient.implementation);
+            output.push(recipient.wrap_nonce.len() as u8);
+            output.push(recipient.wrap_tag.len() as u8);
+            output.push(0);
+            output.extend_from_slice(&recipient.public_key_fingerprint);
+            push_u32_le(&mut output, recipient.kem_ciphertext.len() as u32);
+            push_u32_le(&mut output, recipient.wrapped_key.len() as u32);
+            output.extend_from_slice(&recipient.kem_ciphertext);
+            output.extend_from_slice(&recipient.wrap_nonce);
+            output.extend_from_slice(&recipient.wrapped_key);
+            output.extend_from_slice(&recipient.wrap_tag);
+        }
+        Ok(output)
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let mut cursor = 0usize;
+        if take_bytes(bytes, &mut cursor, 4, "encryption magic")? != ENCRYPTION_MAGIC {
+            return Err(QsrlError::InvalidFormat(
+                "encryption section magic is not QENC".into(),
+            ));
+        }
+        let version = read_u16_le(bytes, &mut cursor, "encryption section version")?;
+        if version != 1 {
+            return Err(QsrlError::UnsupportedVersion(version));
+        }
+        let kem_algorithm = KemAlgorithm::from_code(
+            *take_bytes(bytes, &mut cursor, 1, "KEM algorithm")?
+                .first()
+                .expect("one byte"),
+        )?;
+        let aead_algorithm = AeadAlgorithm::from_code(
+            *take_bytes(bytes, &mut cursor, 1, "AEAD algorithm")?
+                .first()
+                .expect("one byte"),
+        )?;
+        let payload_nonce_len = *take_bytes(bytes, &mut cursor, 1, "payload nonce length")?
+            .first()
+            .expect("one byte") as usize;
+        let payload_tag_len = *take_bytes(bytes, &mut cursor, 1, "payload tag length")?
+            .first()
+            .expect("one byte") as usize;
+        let recipient_count = read_u32_le(bytes, &mut cursor, "recipient count")? as usize;
+        let method_name_len = read_u16_le(bytes, &mut cursor, "KEM method name length")? as usize;
+        let _reserved = take_bytes(bytes, &mut cursor, 2, "encryption section padding")?;
+        let kem_method_name = String::from_utf8(
+            take_bytes(bytes, &mut cursor, method_name_len, "KEM method name")?.to_vec(),
+        )
+        .map_err(|_| QsrlError::InvalidFormat("KEM method name is not valid UTF-8".into()))?;
+        let payload_nonce =
+            take_bytes(bytes, &mut cursor, payload_nonce_len, "payload nonce")?.to_vec();
+
+        let mut recipients = Vec::with_capacity(recipient_count);
+        for _ in 0..recipient_count {
+            let implementation = *take_bytes(bytes, &mut cursor, 1, "recipient implementation")?
+                .first()
+                .expect("one byte");
+            let wrap_nonce_len = *take_bytes(bytes, &mut cursor, 1, "recipient wrap nonce length")?
+                .first()
+                .expect("one byte") as usize;
+            let wrap_tag_len = *take_bytes(bytes, &mut cursor, 1, "recipient wrap tag length")?
+                .first()
+                .expect("one byte") as usize;
+            let _record_reserved = take_bytes(bytes, &mut cursor, 1, "recipient record padding")?;
+            let mut public_key_fingerprint = [0u8; 32];
+            public_key_fingerprint.copy_from_slice(take_bytes(
+                bytes,
+                &mut cursor,
+                32,
+                "recipient public key fingerprint",
+            )?);
+            let kem_ciphertext_len =
+                read_u32_le(bytes, &mut cursor, "recipient KEM ciphertext length")? as usize;
+            let wrapped_key_len =
+                read_u32_le(bytes, &mut cursor, "recipient wrapped key length")? as usize;
+            let kem_ciphertext = take_bytes(
+                bytes,
+                &mut cursor,
+                kem_ciphertext_len,
+                "recipient KEM ciphertext",
+            )?
+            .to_vec();
+            let wrap_nonce =
+                take_bytes(bytes, &mut cursor, wrap_nonce_len, "recipient wrap nonce")?.to_vec();
+            let wrapped_key =
+                take_bytes(bytes, &mut cursor, wrapped_key_len, "recipient wrapped key")?.to_vec();
+            let wrap_tag =
+                take_bytes(bytes, &mut cursor, wrap_tag_len, "recipient wrap tag")?.to_vec();
+            recipients.push(RecipientRecord {
+                implementation,
+                public_key_fingerprint,
+                kem_ciphertext,
+                wrap_nonce,
+                wrapped_key,
+                wrap_tag,
+            });
+        }
+
+        let payload_tag =
+            take_bytes(bytes, &mut cursor, payload_tag_len, "payload AEAD tag")?.to_vec();
+        if cursor != bytes.len() {
+            return Err(QsrlError::InvalidFormat(
+                "encryption section has trailing bytes".into(),
+            ));
+        }
+
+        Ok(Self {
+            kem_algorithm,
+            kem_method_name,
+            aead_algorithm,
+            payload_nonce,
+            payload_tag,
+            recipients,
+        })
+    }
 }
 
 impl SignatureRecord {

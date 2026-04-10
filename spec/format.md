@@ -16,8 +16,9 @@ This document describes the prototype QSRL container layout.
 1. Fixed 64-byte archive header
 2. Canonical manifest block
 3. Canonical block table
-4. File payload area
-5. Optional embedded signature record
+4. Optional encryption section with recipient records
+5. File payload area
+6. Optional embedded signature record
 
 Detached signatures use the same signature-record encoding in a sibling file.
 
@@ -36,8 +37,13 @@ Detached signatures use the same signature-record encoding in a sibling file.
 - Bytes `22..30`: block table length
 - Bytes `30..38`: payload length
 - Bytes `38..46`: embedded signature length
-- Bytes `46..54`: reserved recipient-record length for future encryption extensions
+- Bytes `46..54`: encryption section length
 - Bytes `54..64`: reserved zero padding
+
+Current header flag bits used by the prototype:
+
+- `0x01`: embedded signature present
+- `0x02`: encrypted payload present
 
 ## Manifest contents
 
@@ -68,6 +74,40 @@ timestamps.
 The block table is separate so the prototype can compare signing the manifest
 alone versus signing the manifest plus transport-level layout metadata.
 
+## Encryption section
+
+When present, the encryption section sits between the block table and the
+payload. It contains:
+
+- KEM family identifier
+- Fixed KEM method name for the archive
+- AEAD algorithm identifier
+- Payload nonce
+- Payload authentication tag
+- One or more recipient records
+
+Recipient records contain:
+
+- Backend implementation code
+- Recipient public-key fingerprint
+- ML-KEM ciphertext for that recipient
+- Recipient wrap nonce
+- Wrapped archive key ciphertext
+- Recipient wrap authentication tag
+
+Current prototype choices:
+
+- KEM family: `ml-kem`
+- Fixed KEM method: `ML-KEM-768`
+- Payload AEAD: `AES-256-GCM`
+- Archive key size: 32 bytes
+- Payload nonce size: 12 bytes
+- Payload tag size: 16 bytes
+
+The payload section stores only ciphertext when encryption is enabled. The
+manifest and block table remain plaintext so canonical archive identity and
+signatures stay stable.
+
 ## Signature record
 
 The same signature-record encoding is used both for embedded signatures and for
@@ -85,9 +125,9 @@ Current backend codes used by the prototype:
 - `1`: `stub-lamport-v1`
 - `2`: `liboqs-system-v1`
 
-## Future encryption extension points
+## Signing and encryption split
 
-QSRL does not implement encryption in this prototype. The header reserves space
-for future recipient records so later work can add ML-KEM-based file-key
-wrapping plus AEAD payload encryption without redefining the archive identity
-model or signature scope.
+QSRL signatures continue to bind the canonical manifest and, optionally, the
+block table. They do not sign ciphertext bytes directly. Encryption protects the
+payload section and archive-key access, while signatures continue to define
+archive identity and transport-level determinism.

@@ -8,7 +8,13 @@ use qsrl::commands::{
     SettingsOverrides, extract_archive, keygen, pack_archive, sign_archive, verify_archive,
 };
 use qsrl::error::QsrlError;
-use qsrl::protocol::{CompressionLayout, CompressionMode, SignatureAlgorithm, SignaturePlacement};
+use qsrl::protocol::{
+    CompressionLayout, CompressionMode, SignatureAlgorithm, SignaturePlacement,
+};
+#[cfg(feature = "liboqs-backend")]
+use qsrl::commands::{extract_archive_with_recipient, pack_archive_with_recipients, recipient_keygen};
+#[cfg(feature = "liboqs-backend")]
+use qsrl::protocol::KemAlgorithm;
 
 fn fresh_temp_dir(label: &str) -> PathBuf {
     let dir = env::temp_dir().join(format!("qsrl-test-{label}-{}", qsrl::util::unique_id()));
@@ -285,6 +291,177 @@ fn extract_rejects_corruption_before_writing() {
         extract_archive(&archive_path, &output, None, None).expect_err("extract should fail");
     assert!(matches!(error, QsrlError::DataCorruption(_)));
     assert!(!output.exists());
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
+fn encrypted_archive_creation_and_decrypt_extract_round_trip() {
+    let root = fresh_temp_dir("encrypted-round-trip");
+    let input = write_sample_input(&root);
+    let archive = root.join("encrypted.qsrl");
+    let output = root.join("decrypted");
+
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate signature key");
+    let recipient_private_key = root.join("keys").join("ml-kem-001.private");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+    let signature_private_key = root.join("keys").join("ml-dsa-001.private");
+    let signature_public_key = root.join("keys").join("ml-dsa-001.public");
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted archive");
+    let parsed = Archive::read_from_path(&archive).expect("read encrypted archive");
+    assert!(parsed.encryption.is_some());
+
+    sign_archive(
+        &archive,
+        &signature_private_key,
+        Some(SignaturePlacement::Embedded),
+        None,
+    )
+    .expect("sign archive");
+    let verify_output =
+        verify_archive(&archive, &signature_public_key, None).expect("verify archive");
+    assert!(verify_output.contains("signature: ok"));
+    assert!(verify_output.contains("file hashes: not checked"));
+
+    let extract_output = extract_archive_with_recipient(
+        &archive,
+        &output,
+        Some(&signature_public_key),
+        None,
+        Some(&recipient_private_key),
+    )
+    .expect("decrypt and extract archive");
+    assert!(extract_output.contains("encryption: decrypted"));
+    assert!(extract_output.contains("signature: ok"));
+    assert_eq!(read_tree(&input), read_tree(&output));
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
+fn wrong_recipient_key_is_rejected() {
+    let root = fresh_temp_dir("wrong-recipient");
+    let input = write_sample_input(&root);
+    let archive = root.join("wrong-recipient.qsrl");
+    let output = root.join("decrypted");
+
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate extra recipient key");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+    let wrong_private_key = root.join("keys").join("ml-kem-002.private");
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted archive");
+
+    let error =
+        extract_archive_with_recipient(&archive, &output, None, None, Some(&wrong_private_key))
+            .expect_err("extract should fail");
+    assert!(matches!(error, QsrlError::KeyRejected(_)));
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
+fn corrupted_encrypted_ciphertext_is_detected() {
+    let root = fresh_temp_dir("encrypted-corruption");
+    let input = write_sample_input(&root);
+    let archive = root.join("encrypted-corrupt.qsrl");
+    let output = root.join("decrypted");
+
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    let recipient_private_key = root.join("keys").join("ml-kem-001.private");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted archive");
+
+    let parsed = Archive::read_from_path(&archive).expect("read archive");
+    let mut bytes = fs::read(&archive).expect("read encrypted bytes");
+    let payload_offset = parsed.payload_offset();
+    bytes[payload_offset] ^= 0x01;
+    fs::write(&archive, bytes).expect("rewrite archive");
+
+    let error =
+        extract_archive_with_recipient(&archive, &output, None, None, Some(&recipient_private_key))
+            .expect_err("extract should fail");
+    assert!(matches!(error, QsrlError::DataCorruption(_)));
+    assert!(!output.exists());
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
+fn signed_only_and_signed_plus_encrypted_archives_coexist() {
+    let root = fresh_temp_dir("coexistence");
+    let input = write_sample_input(&root);
+    let plain_archive = root.join("plain.qsrl");
+    let encrypted_archive = root.join("encrypted.qsrl");
+    let encrypted_output = root.join("encrypted-output");
+
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate signature key");
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    let signature_private_key = root.join("keys").join("ml-dsa-001.private");
+    let signature_public_key = root.join("keys").join("ml-dsa-001.public");
+    let recipient_private_key = root.join("keys").join("ml-kem-001.private");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+
+    pack_archive(&root, &input, &plain_archive, SettingsOverrides::default()).expect("pack plain");
+    sign_archive(
+        &plain_archive,
+        &signature_private_key,
+        Some(SignaturePlacement::Embedded),
+        None,
+    )
+    .expect("sign plain archive");
+    let plain_verify =
+        verify_archive(&plain_archive, &signature_public_key, None).expect("verify plain archive");
+    assert!(plain_verify.contains("file hashes: ok"));
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &encrypted_archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted");
+    sign_archive(
+        &encrypted_archive,
+        &signature_private_key,
+        Some(SignaturePlacement::Embedded),
+        None,
+    )
+    .expect("sign encrypted archive");
+    let encrypted_verify = verify_archive(&encrypted_archive, &signature_public_key, None)
+        .expect("verify encrypted archive");
+    assert!(encrypted_verify.contains("file hashes: not checked"));
+
+    extract_archive_with_recipient(
+        &encrypted_archive,
+        &encrypted_output,
+        Some(&signature_public_key),
+        None,
+        Some(&recipient_private_key),
+    )
+    .expect("extract encrypted archive");
+    assert_eq!(read_tree(&input), read_tree(&encrypted_output));
 }
 
 #[test]

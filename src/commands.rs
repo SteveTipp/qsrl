@@ -7,15 +7,18 @@ use crate::FORMAT_VERSION;
 use crate::archive::{Archive, PackPlan, default_detached_signature_path};
 use crate::config::RepoConfig;
 use crate::crypto::{
-    KeyImplementation, generate_keypair, load_private_key, load_public_key, message_digest,
-    sign_message, verify_signature, write_private_key, write_public_key,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, ARCHIVE_KEY_LEN, KeyImplementation, decrypt_aead, encrypt_aead,
+    generate_keypair, generate_recipient_keypair, load_private_key, load_public_key,
+    load_recipient_private_key, load_recipient_public_key, message_digest, sign_message,
+    unwrap_archive_key_for_recipient, verify_signature, wrap_archive_key_for_recipient,
+    write_private_key, write_public_key, write_recipient_private_key, write_recipient_public_key,
 };
 use crate::error::{QsrlError, Result};
 use crate::protocol::{
-    CompressionLayout, CompressionMode, ManifestEncoding, SignatureAlgorithm, SignaturePlacement,
-    SignatureRecord, SignatureScope,
+    AeadAlgorithm, CompressionLayout, CompressionMode, EncryptionSection, KemAlgorithm,
+    ManifestEncoding, SignatureAlgorithm, SignaturePlacement, SignatureRecord, SignatureScope,
 };
-use crate::util::{ensure_parent_dir, unique_id, write_string};
+use crate::util::{ensure_parent_dir, read_random_bytes, unique_id, write_string};
 
 #[derive(Clone, Debug, Default)]
 pub struct SettingsOverrides {
@@ -49,6 +52,16 @@ pub fn pack_archive(
     output_path: &Path,
     overrides: SettingsOverrides,
 ) -> Result<String> {
+    pack_archive_with_recipients(root, input_path, output_path, overrides, &[])
+}
+
+pub fn pack_archive_with_recipients(
+    root: &Path,
+    input_path: &Path,
+    output_path: &Path,
+    overrides: SettingsOverrides,
+    recipient_key_paths: &[PathBuf],
+) -> Result<String> {
     let config = resolve_config(root, overrides)?;
     let plan = PackPlan {
         format_version: config.format_version,
@@ -60,9 +73,22 @@ pub fn pack_archive(
         compression_layout: config.compression_layout,
     };
     let mut archive = Archive::build_from_path(input_path, &plan)?;
+    if !recipient_key_paths.is_empty() {
+        encrypt_archive_payload(&mut archive, recipient_key_paths)?;
+    }
     archive.write_to_path(output_path)?;
+    let encryption_status = if let Some(encryption) = &archive.encryption {
+        format!(
+            "{} / {} ({} recipients)",
+            encryption.kem_method_name,
+            encryption.aead_algorithm.as_str(),
+            encryption.recipients.len()
+        )
+    } else {
+        "none".into()
+    };
     Ok(format!(
-        "packed {} files into {}\nmanifest bytes: {}\nblock table bytes: {}\npayload bytes: {}\nsignature algorithm: {}\nsignature placement: {}\nmanifest scope: {}\ncompression: {} / {}",
+        "packed {} files into {}\nmanifest bytes: {}\nblock table bytes: {}\npayload bytes: {}\nsignature algorithm: {}\nsignature placement: {}\nmanifest scope: {}\ncompression: {} / {}\nencryption: {}",
         archive.manifest.files.len(),
         output_path.display(),
         archive.manifest_bytes.len(),
@@ -73,6 +99,7 @@ pub fn pack_archive(
         archive.manifest.signature_scope.as_str(),
         archive.manifest.compression_mode.as_str(),
         archive.manifest.compression_layout.as_str(),
+        encryption_status,
     ))
 }
 
@@ -100,6 +127,29 @@ pub fn keygen(root: &Path, algorithm: SignatureAlgorithm) -> Result<String> {
         output.push_str(
             "\nnote: this build is using the prototype stub backend; rebuild with --features liboqs-backend for real liboqs signatures",
         );
+    }
+    Ok(output)
+}
+
+pub fn recipient_keygen(root: &Path, algorithm: KemAlgorithm) -> Result<String> {
+    let keys_dir = root.join("keys");
+    fs::create_dir_all(&keys_dir).map_err(|err| QsrlError::io("creating keys directory", err))?;
+    let key_id = next_named_key_id(&keys_dir, algorithm.as_str())?;
+    let (private_key, public_key) = generate_recipient_keypair(algorithm, key_id.clone())?;
+    let private_path = keys_dir.join(format!("{key_id}.private"));
+    let public_path = keys_dir.join(format!("{key_id}.public"));
+    write_recipient_private_key(&private_path, &private_key)?;
+    write_recipient_public_key(&public_path, &public_key)?;
+    let mut output = format!(
+        "generated {} recipient keypair\nprivate key: {}\npublic key: {}\nbackend: {}\nmethod: {}",
+        algorithm.as_str(),
+        private_path.display(),
+        public_path.display(),
+        private_key.implementation_label(),
+        private_key.method_name,
+    );
+    if let Some(version) = &private_key.library_version {
+        output.push_str(&format!("\nliboqs version: {version}"));
     }
     Ok(output)
 }
@@ -188,12 +238,18 @@ pub fn verify_archive(
     let archive = Archive::read_from_path(archive_path)?;
     let signature_status =
         verify_archive_signature(&archive, archive_path, public_key_path, signature_path)?;
-    archive.verify_file_hashes()?;
+    let file_hash_status: String = if archive.is_encrypted() {
+        "file hashes: not checked (encrypted payload; use qsrl extract --recipient-key to decrypt and verify contents)".into()
+    } else {
+        archive.verify_file_hashes()?;
+        "file hashes: ok".into()
+    };
 
     Ok(format!(
-        "verified {}\n{}\nfile hashes: ok\nfiles checked: {}\nplacement: {}\nalgorithm: {}",
+        "verified {}\n{}\n{}\nfiles checked: {}\nplacement: {}\nalgorithm: {}",
         archive_path.display(),
         signature_status,
+        file_hash_status,
         archive.manifest.files.len(),
         archive.manifest.signature_placement.as_str(),
         archive.manifest.signature_algorithm.as_str(),
@@ -205,6 +261,22 @@ pub fn extract_archive(
     output_dir: &Path,
     public_key_path: Option<&Path>,
     signature_path: Option<&Path>,
+) -> Result<String> {
+    extract_archive_with_recipient(
+        archive_path,
+        output_dir,
+        public_key_path,
+        signature_path,
+        None,
+    )
+}
+
+pub fn extract_archive_with_recipient(
+    archive_path: &Path,
+    output_dir: &Path,
+    public_key_path: Option<&Path>,
+    signature_path: Option<&Path>,
+    recipient_key_path: Option<&Path>,
 ) -> Result<String> {
     let archive = Archive::read_from_path(archive_path)?;
     let signature_status = if let Some(public_key_path) = public_key_path {
@@ -222,7 +294,19 @@ pub fn extract_archive(
         None
     };
 
-    let files = archive.extract_files()?;
+    let decoded_payload = if archive.is_encrypted() {
+        let recipient_key = recipient_key_path.ok_or_else(|| {
+            QsrlError::Usage(
+                "archive payload is encrypted; provide --recipient-key <private_key> to extract"
+                    .into(),
+            )
+        })?;
+        decrypt_archive_payload(&archive, recipient_key)?
+    } else {
+        archive.payload.clone()
+    };
+
+    let files = archive.decode_payload(&decoded_payload)?;
     archive.verify_decoded_files(&files)?;
     let relative_paths = planned_output_paths(&archive, output_dir)?;
 
@@ -241,6 +325,9 @@ pub fn extract_archive(
         archive.manifest.files.len(),
         output_dir.display()
     );
+    if archive.is_encrypted() {
+        output.push_str("\nencryption: decrypted");
+    }
     if let Some(status) = signature_status {
         output.push_str(&format!("\n{status}"));
     }
@@ -295,6 +382,16 @@ pub fn inspect_archive(archive_path: &Path) -> Result<String> {
         archive.block_table_bytes.len()
     ));
     output.push_str(&format!("payload bytes: {}\n", archive.payload.len()));
+    if let Some(encryption) = &archive.encryption {
+        output.push_str(&format!(
+            "encryption: {} / {}\n",
+            encryption.kem_method_name,
+            encryption.aead_algorithm.as_str()
+        ));
+        output.push_str(&format!("recipients: {}\n", encryption.recipients.len()));
+    } else {
+        output.push_str("encryption: none\n");
+    }
     output.push_str(&format!("signature status: {signature_status}\n"));
     output.push_str(&format!("files: {}\n", archive.manifest.files.len()));
     for entry in &archive.manifest.files {
@@ -546,7 +643,11 @@ fn resolve_config(root: &Path, overrides: SettingsOverrides) -> Result<RepoConfi
 }
 
 fn next_key_id(keys_dir: &Path, algorithm: SignatureAlgorithm) -> Result<String> {
-    let prefix = format!("{}-", algorithm.as_str());
+    next_named_key_id(keys_dir, algorithm.as_str())
+}
+
+fn next_named_key_id(keys_dir: &Path, name: &str) -> Result<String> {
+    let prefix = format!("{name}-");
     let mut next_index = 1usize;
     if keys_dir.exists() {
         for entry in fs::read_dir(keys_dir)
@@ -566,7 +667,109 @@ fn next_key_id(keys_dir: &Path, algorithm: SignatureAlgorithm) -> Result<String>
             }
         }
     }
-    Ok(format!("{}-{:03}", algorithm.as_str(), next_index))
+    Ok(format!("{name}-{:03}", next_index))
+}
+
+fn encrypt_archive_payload(archive: &mut Archive, recipient_key_paths: &[PathBuf]) -> Result<()> {
+    if archive.is_encrypted() {
+        return Err(QsrlError::UnsupportedFeature(
+            "archive payload is already encrypted".into(),
+        ));
+    }
+    if recipient_key_paths.is_empty() {
+        return Ok(());
+    }
+
+    let archive_key = read_random_bytes(ARCHIVE_KEY_LEN)?;
+    let payload_nonce = read_random_bytes(AEAD_NONCE_LEN)?;
+    let mut recipient_records = Vec::with_capacity(recipient_key_paths.len());
+    let mut fingerprints = BTreeSet::new();
+    let mut kem_method_name: Option<String> = None;
+
+    for path in recipient_key_paths {
+        let public_key = load_recipient_public_key(path)?;
+        if !fingerprints.insert(public_key.fingerprint) {
+            return Err(QsrlError::Usage(format!(
+                "duplicate recipient public key: {}",
+                path.display()
+            )));
+        }
+        if let Some(existing) = &kem_method_name {
+            if *existing != public_key.method_name {
+                return Err(QsrlError::UnsupportedFeature(
+                    "prototype encrypted archives require the same ML-KEM method for all recipients"
+                        .into(),
+                ));
+            }
+        } else {
+            kem_method_name = Some(public_key.method_name.clone());
+        }
+        recipient_records.push(wrap_archive_key_for_recipient(&public_key, &archive_key)?);
+    }
+
+    let mut encryption = EncryptionSection {
+        kem_algorithm: KemAlgorithm::MlKem,
+        kem_method_name: kem_method_name.unwrap_or_else(|| "ML-KEM-768".into()),
+        aead_algorithm: AeadAlgorithm::Aes256Gcm,
+        payload_nonce,
+        payload_tag: vec![0u8; AEAD_TAG_LEN],
+        recipients: recipient_records,
+    };
+    let aad = archive.encryption_aad(&encryption)?;
+    let (ciphertext, payload_tag) = encrypt_aead(
+        &archive_key,
+        &encryption.payload_nonce,
+        &aad,
+        &archive.payload,
+    )?;
+    encryption.payload_tag = payload_tag;
+    archive.set_encryption(encryption, ciphertext);
+    Ok(())
+}
+
+fn decrypt_archive_payload(archive: &Archive, recipient_key_path: &Path) -> Result<Vec<u8>> {
+    let encryption = archive
+        .encryption
+        .as_ref()
+        .ok_or_else(|| QsrlError::UnsupportedFeature("archive payload is not encrypted".into()))?;
+    if encryption.aead_algorithm != AeadAlgorithm::Aes256Gcm {
+        return Err(QsrlError::UnsupportedFeature(format!(
+            "unsupported archive AEAD algorithm {}",
+            encryption.aead_algorithm.as_str()
+        )));
+    }
+
+    let private_key = load_recipient_private_key(recipient_key_path)?;
+    if private_key.method_name != encryption.kem_method_name {
+        return Err(QsrlError::KeyRejected(format!(
+            "archive expects recipient KEM method {} but private key is {}",
+            encryption.kem_method_name, private_key.method_name
+        )));
+    }
+    let recipient_record = encryption
+        .recipients
+        .iter()
+        .find(|record| record.public_key_fingerprint == private_key.public_key_fingerprint)
+        .ok_or_else(|| {
+            QsrlError::KeyRejected(
+                "recipient private key does not match any recipient record in this archive".into(),
+            )
+        })?;
+    let archive_key = unwrap_archive_key_for_recipient(&private_key, recipient_record)?;
+    if archive_key.len() != ARCHIVE_KEY_LEN {
+        return Err(QsrlError::KeyRejected(format!(
+            "unwrapped archive key length {} did not match expected {ARCHIVE_KEY_LEN}",
+            archive_key.len()
+        )));
+    }
+    let aad = archive.encryption_aad(encryption)?;
+    decrypt_aead(
+        &archive_key,
+        &encryption.payload_nonce,
+        &aad,
+        &archive.payload,
+        &encryption.payload_tag,
+    )
 }
 
 fn verify_archive_signature(

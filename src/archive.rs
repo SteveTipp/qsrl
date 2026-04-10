@@ -4,8 +4,9 @@ use crate::FORMAT_VERSION;
 use crate::codec::{compress, decompress};
 use crate::error::{QsrlError, Result};
 use crate::protocol::{
-    ArchiveHeader, BlockEntry, BlockTable, CompressionLayout, FileEntry, Manifest,
-    ManifestEncoding, SignatureAlgorithm, SignaturePlacement, SignatureRecord, SignatureScope,
+    ARCHIVE_FLAG_EMBEDDED_SIGNATURE, ARCHIVE_FLAG_ENCRYPTED_PAYLOAD, ArchiveHeader, BlockEntry,
+    BlockTable, CompressionLayout, EncryptionSection, FileEntry, Manifest, ManifestEncoding,
+    SignatureAlgorithm, SignaturePlacement, SignatureRecord, SignatureScope,
 };
 use crate::sha256::digest;
 use crate::util::{collect_input_files, read_bytes, write_bytes};
@@ -28,6 +29,7 @@ pub struct Archive {
     pub manifest_bytes: Vec<u8>,
     pub block_table: BlockTable,
     pub block_table_bytes: Vec<u8>,
+    pub encryption: Option<EncryptionSection>,
     pub payload: Vec<u8>,
     pub signature: Option<SignatureRecord>,
 }
@@ -130,6 +132,7 @@ impl Archive {
             manifest_bytes,
             block_table,
             block_table_bytes,
+            encryption: None,
             payload,
             signature: None,
         })
@@ -152,12 +155,24 @@ impl Archive {
         let manifest_end = checked_end(manifest_start, header.manifest_len as usize, bytes.len())?;
         let block_table_end =
             checked_end(manifest_end, header.block_table_len as usize, bytes.len())?;
-        let payload_end = checked_end(block_table_end, header.payload_len as usize, bytes.len())?;
+        let encryption_end = checked_end(
+            block_table_end,
+            header.recipient_records_len as usize,
+            bytes.len(),
+        )?;
+        let payload_end = checked_end(encryption_end, header.payload_len as usize, bytes.len())?;
         let signature_end = checked_end(payload_end, header.signature_len as usize, bytes.len())?;
 
         let manifest_bytes = bytes[manifest_start..manifest_end].to_vec();
         let block_table_bytes = bytes[manifest_end..block_table_end].to_vec();
-        let payload = bytes[block_table_end..payload_end].to_vec();
+        let encryption = if header.recipient_records_len > 0 {
+            Some(EncryptionSection::deserialize(
+                &bytes[block_table_end..encryption_end],
+            )?)
+        } else {
+            None
+        };
+        let payload = bytes[encryption_end..payload_end].to_vec();
         let signature = if header.signature_len > 0 {
             Some(SignatureRecord::deserialize(
                 &bytes[payload_end..signature_end],
@@ -182,6 +197,7 @@ impl Archive {
             manifest_bytes,
             block_table,
             block_table_bytes,
+            encryption,
             payload,
             signature,
         })
@@ -197,6 +213,9 @@ impl Archive {
         let mut output = self.header.serialize();
         output.extend_from_slice(&self.manifest_bytes);
         output.extend_from_slice(&self.block_table_bytes);
+        if let Some(encryption) = &self.encryption {
+            output.extend_from_slice(&encryption.serialize().expect("encryption serialize"));
+        }
         output.extend_from_slice(&self.payload);
         if self.header.signature_placement == SignaturePlacement::Embedded {
             if let Some(signature) = &self.signature {
@@ -241,13 +260,30 @@ impl Archive {
     }
 
     pub fn payload_offset(&self) -> usize {
-        ArchiveHeader::SIZE + self.manifest_bytes.len() + self.block_table_bytes.len()
+        ArchiveHeader::SIZE
+            + self.manifest_bytes.len()
+            + self.block_table_bytes.len()
+            + self
+                .encryption
+                .as_ref()
+                .map(|value| value.serialize().expect("encryption serialize").len())
+                .unwrap_or(0)
     }
 
     pub fn extract_files(&self) -> Result<Vec<Vec<u8>>> {
+        if self.is_encrypted() {
+            return Err(QsrlError::UnsupportedFeature(
+                "archive payload is encrypted; use a recipient private key to decrypt before extraction"
+                    .into(),
+            ));
+        }
+        self.decode_payload(&self.payload)
+    }
+
+    pub fn decode_payload(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
         match self.manifest.compression_layout {
-            CompressionLayout::PerFile => self.extract_per_file_payloads(),
-            CompressionLayout::WholeArchive => self.extract_whole_archive_payloads(),
+            CompressionLayout::PerFile => self.extract_per_file_payloads(payload),
+            CompressionLayout::WholeArchive => self.extract_whole_archive_payloads(payload),
         }
     }
 
@@ -302,6 +338,11 @@ impl Archive {
     fn refresh_header(&mut self) {
         self.header.manifest_len = self.manifest_bytes.len() as u64;
         self.header.block_table_len = self.block_table_bytes.len() as u64;
+        self.header.recipient_records_len = self
+            .encryption
+            .as_ref()
+            .map(|value| value.serialize().expect("encryption serialize").len() as u64)
+            .unwrap_or(0);
         self.header.payload_len = self.payload.len() as u64;
         self.header.signature_len =
             if self.header.signature_placement == SignaturePlacement::Embedded {
@@ -312,32 +353,37 @@ impl Archive {
             } else {
                 0
             };
-        self.header.flags = u8::from(
-            self.header.signature_placement == SignaturePlacement::Embedded
-                && self.signature.is_some(),
-        );
+        self.header.flags = 0;
+        if self.header.signature_placement == SignaturePlacement::Embedded
+            && self.signature.is_some()
+        {
+            self.header.flags |= ARCHIVE_FLAG_EMBEDDED_SIGNATURE;
+        }
+        if self.encryption.is_some() {
+            self.header.flags |= ARCHIVE_FLAG_ENCRYPTED_PAYLOAD;
+        }
     }
 
-    fn extract_per_file_payloads(&self) -> Result<Vec<Vec<u8>>> {
+    fn extract_per_file_payloads(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
         let mut files = Vec::with_capacity(self.block_table.entries.len());
         for entry in &self.block_table.entries {
             let start = entry.stored_offset as usize;
             let end = start
                 .checked_add(entry.stored_len as usize)
                 .ok_or_else(|| QsrlError::DataCorruption("stored block overflow".into()))?;
-            if end > self.payload.len() {
+            if end > payload.len() {
                 return Err(QsrlError::DataCorruption(
                     "block table points beyond the payload section".into(),
                 ));
             }
-            let stored = &self.payload[start..end];
+            let stored = &payload[start..end];
             let raw = decompress(entry.compression, stored, Some(entry.raw_len as usize))?;
             files.push(raw);
         }
         Ok(files)
     }
 
-    fn extract_whole_archive_payloads(&self) -> Result<Vec<Vec<u8>>> {
+    fn extract_whole_archive_payloads(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
         let total_raw_len = self
             .block_table
             .entries
@@ -345,11 +391,7 @@ impl Archive {
             .map(|entry| entry.raw_offset + entry.raw_len)
             .max()
             .unwrap_or(0) as usize;
-        let raw_payload = decompress(
-            self.manifest.compression_mode,
-            &self.payload,
-            Some(total_raw_len),
-        )?;
+        let raw_payload = decompress(self.manifest.compression_mode, payload, Some(total_raw_len))?;
         let mut files = Vec::with_capacity(self.block_table.entries.len());
         for entry in &self.block_table.entries {
             let start = entry.raw_offset as usize;
@@ -364,6 +406,29 @@ impl Archive {
             files.push(raw_payload[start..end].to_vec());
         }
         Ok(files)
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption.is_some()
+    }
+
+    pub fn encryption_aad(&self, encryption: &EncryptionSection) -> Result<Vec<u8>> {
+        let mut aad = Vec::with_capacity(
+            self.manifest_bytes.len()
+                + self.block_table_bytes.len()
+                + encryption.aad_bytes()?.len(),
+        );
+        aad.extend_from_slice(b"QSRL-PAYLOAD-AAD");
+        aad.extend_from_slice(&self.manifest_bytes);
+        aad.extend_from_slice(&self.block_table_bytes);
+        aad.extend_from_slice(&encryption.aad_bytes()?);
+        Ok(aad)
+    }
+
+    pub fn set_encryption(&mut self, encryption: EncryptionSection, ciphertext: Vec<u8>) {
+        self.encryption = Some(encryption);
+        self.payload = ciphertext;
+        self.refresh_header();
     }
 }
 

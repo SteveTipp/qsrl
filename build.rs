@@ -23,10 +23,7 @@ fn main() {
             println!("cargo:rustc-link-search=native={}", lib64_dir.display());
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib64_dir.display());
         }
-        pkg_config::Config::new()
-            .statik(true)
-            .probe("openssl")
-            .expect("liboqs-backend could not locate OpenSSL via pkg-config");
+        probe_openssl();
         return;
     }
 
@@ -35,4 +32,12 @@ fn main() {
         .atleast_version("0.15.0")
         .probe("liboqs")
         .expect("liboqs-backend requires liboqs >= 0.15.0 via pkg-config or LIBOQS_DIR");
+    probe_openssl();
+}
+
+fn probe_openssl() {
+    pkg_config::Config::new()
+        .statik(true)
+        .probe("openssl")
+        .expect("liboqs-backend could not locate OpenSSL via pkg-config");
 }

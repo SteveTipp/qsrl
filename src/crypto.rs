@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{QsrlError, Result};
-use crate::protocol::SignatureAlgorithm;
+use crate::protocol::{KemAlgorithm, RecipientRecord, SignatureAlgorithm};
 use crate::sha256::{digest, digest_parts};
 use crate::util::{hex_decode, hex_encode, read_random_bytes, read_string, write_string};
 
@@ -17,6 +17,12 @@ const STUB_METHOD_NAME_SLH_DSA: &str = "QSRL-STUB-SLH-DSA";
 const LIBOQS_METHOD_NAME_ML_DSA: &str = "ML-DSA-65";
 #[cfg(feature = "liboqs-backend")]
 const LIBOQS_METHOD_NAME_SLH_DSA: &str = "SLH_DSA_PURE_SHA2_192S";
+#[cfg(feature = "liboqs-backend")]
+const LIBOQS_METHOD_NAME_ML_KEM: &str = "ML-KEM-768";
+
+pub const ARCHIVE_KEY_LEN: usize = 32;
+pub const AEAD_NONCE_LEN: usize = 12;
+pub const AEAD_TAG_LEN: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyImplementation {
@@ -86,6 +92,51 @@ pub struct PublicKey {
     pub public_key_bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct KemPrivateKey {
+    pub algorithm: KemAlgorithm,
+    pub key_id: String,
+    pub public_key_fingerprint: [u8; 32],
+    pub implementation: KeyImplementation,
+    pub method_name: String,
+    pub algorithm_version: Option<String>,
+    pub library_version: Option<String>,
+    pub public_key_bytes: Vec<u8>,
+    pub secret_key_bytes: Vec<u8>,
+}
+
+impl KemPrivateKey {
+    pub fn implementation_code(&self) -> u8 {
+        self.implementation.code()
+    }
+
+    pub fn implementation_label(&self) -> &'static str {
+        self.implementation.label()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct KemPublicKey {
+    pub algorithm: KemAlgorithm,
+    pub key_id: String,
+    pub fingerprint: [u8; 32],
+    pub implementation: KeyImplementation,
+    pub method_name: String,
+    pub algorithm_version: Option<String>,
+    pub library_version: Option<String>,
+    pub public_key_bytes: Vec<u8>,
+}
+
+impl KemPublicKey {
+    pub fn implementation_code(&self) -> u8 {
+        self.implementation.code()
+    }
+
+    pub fn implementation_label(&self) -> &'static str {
+        self.implementation.label()
+    }
+}
+
 impl PublicKey {
     pub fn implementation_code(&self) -> u8 {
         self.implementation.code()
@@ -136,6 +187,95 @@ pub fn verify_signature(public_key: &PublicKey, message: &[u8], signature: &[u8]
     }
 }
 
+pub fn generate_recipient_keypair(
+    algorithm: KemAlgorithm,
+    key_id: String,
+) -> Result<(KemPrivateKey, KemPublicKey)> {
+    if cfg!(feature = "liboqs-backend") {
+        return generate_liboqs_kem_keypair(algorithm, key_id);
+    }
+    Err(QsrlError::UnsupportedFeature(
+        "recipient encryption requires the liboqs backend; rebuild with --features liboqs-backend"
+            .into(),
+    ))
+}
+
+pub fn wrap_archive_key_for_recipient(
+    public_key: &KemPublicKey,
+    archive_key: &[u8],
+) -> Result<RecipientRecord> {
+    if archive_key.len() != ARCHIVE_KEY_LEN {
+        return Err(QsrlError::UnsupportedFeature(format!(
+            "archive key length {} did not match expected {ARCHIVE_KEY_LEN}",
+            archive_key.len()
+        )));
+    }
+    match public_key.implementation {
+        KeyImplementation::LiboqsSystemV1 => wrap_archive_key_liboqs(public_key, archive_key),
+        KeyImplementation::StubLamportV1 => Err(QsrlError::UnsupportedFeature(
+            "recipient encryption is not available with the stub backend".into(),
+        )),
+    }
+}
+
+pub fn unwrap_archive_key_for_recipient(
+    private_key: &KemPrivateKey,
+    record: &RecipientRecord,
+) -> Result<Vec<u8>> {
+    match private_key.implementation {
+        KeyImplementation::LiboqsSystemV1 => unwrap_archive_key_liboqs(private_key, record),
+        KeyImplementation::StubLamportV1 => Err(QsrlError::UnsupportedFeature(
+            "recipient encryption is not available with the stub backend".into(),
+        )),
+    }
+}
+
+pub fn encrypt_aead(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    #[cfg(feature = "liboqs-backend")]
+    {
+        openssl_aead::encrypt_aes_256_gcm(key, nonce, aad, plaintext)
+    }
+    #[cfg(not(feature = "liboqs-backend"))]
+    {
+        let _ = key;
+        let _ = nonce;
+        let _ = aad;
+        let _ = plaintext;
+        Err(QsrlError::UnsupportedFeature(
+            "AEAD encryption requires the liboqs backend build in this prototype".into(),
+        ))
+    }
+}
+
+pub fn decrypt_aead(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    ciphertext: &[u8],
+    tag: &[u8],
+) -> Result<Vec<u8>> {
+    #[cfg(feature = "liboqs-backend")]
+    {
+        openssl_aead::decrypt_aes_256_gcm(key, nonce, aad, ciphertext, tag)
+    }
+    #[cfg(not(feature = "liboqs-backend"))]
+    {
+        let _ = key;
+        let _ = nonce;
+        let _ = aad;
+        let _ = ciphertext;
+        let _ = tag;
+        Err(QsrlError::UnsupportedFeature(
+            "AEAD decryption requires the liboqs backend build in this prototype".into(),
+        ))
+    }
+}
+
 pub fn write_private_key(path: &Path, key: &PrivateKey) -> Result<()> {
     let mut contents = String::new();
     contents.push_str("# Quantum Sealed Record Layer prototype key file\n");
@@ -173,6 +313,68 @@ pub fn write_public_key(path: &Path, key: &PublicKey) -> Result<()> {
     let mut contents = String::new();
     contents.push_str("# Quantum Sealed Record Layer prototype key file\n");
     contents.push_str("type = \"public\"\n");
+    contents.push_str(&format!("algorithm = \"{}\"\n", key.algorithm.as_str()));
+    contents.push_str(&format!(
+        "implementation = \"{}\"\n",
+        key.implementation_label()
+    ));
+    contents.push_str(&format!("key_id = \"{}\"\n", key.key_id));
+    contents.push_str(&format!("method_name = \"{}\"\n", key.method_name));
+    if let Some(value) = &key.algorithm_version {
+        contents.push_str(&format!("algorithm_version = \"{}\"\n", value));
+    }
+    if let Some(value) = &key.library_version {
+        contents.push_str(&format!("library_version = \"{}\"\n", value));
+    }
+    contents.push_str(&format!(
+        "public_key_fingerprint = \"{}\"\n",
+        hex_encode(&key.fingerprint)
+    ));
+    contents.push_str(&format!(
+        "public_key = \"{}\"\n",
+        hex_encode(&key.public_key_bytes)
+    ));
+    write_string(path, &contents)
+}
+
+pub fn write_recipient_private_key(path: &Path, key: &KemPrivateKey) -> Result<()> {
+    let mut contents = String::new();
+    contents.push_str("# Quantum Sealed Record Layer prototype recipient key file\n");
+    contents.push_str("type = \"private\"\n");
+    contents.push_str("usage = \"recipient\"\n");
+    contents.push_str(&format!("algorithm = \"{}\"\n", key.algorithm.as_str()));
+    contents.push_str(&format!(
+        "implementation = \"{}\"\n",
+        key.implementation_label()
+    ));
+    contents.push_str(&format!("key_id = \"{}\"\n", key.key_id));
+    contents.push_str(&format!("method_name = \"{}\"\n", key.method_name));
+    if let Some(value) = &key.algorithm_version {
+        contents.push_str(&format!("algorithm_version = \"{}\"\n", value));
+    }
+    if let Some(value) = &key.library_version {
+        contents.push_str(&format!("library_version = \"{}\"\n", value));
+    }
+    contents.push_str(&format!(
+        "public_key_fingerprint = \"{}\"\n",
+        hex_encode(&key.public_key_fingerprint)
+    ));
+    contents.push_str(&format!(
+        "public_key = \"{}\"\n",
+        hex_encode(&key.public_key_bytes)
+    ));
+    contents.push_str(&format!(
+        "secret_key = \"{}\"\n",
+        hex_encode(&key.secret_key_bytes)
+    ));
+    write_string(path, &contents)
+}
+
+pub fn write_recipient_public_key(path: &Path, key: &KemPublicKey) -> Result<()> {
+    let mut contents = String::new();
+    contents.push_str("# Quantum Sealed Record Layer prototype recipient key file\n");
+    contents.push_str("type = \"public\"\n");
+    contents.push_str("usage = \"recipient\"\n");
     contents.push_str(&format!("algorithm = \"{}\"\n", key.algorithm.as_str()));
     contents.push_str(&format!(
         "implementation = \"{}\"\n",
@@ -256,6 +458,76 @@ pub fn load_public_key(path: &Path) -> Result<PublicKey> {
     }
 
     Ok(PublicKey {
+        algorithm,
+        key_id,
+        fingerprint,
+        implementation,
+        method_name,
+        algorithm_version,
+        library_version,
+        public_key_bytes,
+    })
+}
+
+pub fn load_recipient_private_key(path: &Path) -> Result<KemPrivateKey> {
+    let map = parse_key_file(path)?;
+    ensure_key_type(&map, "private")?;
+    ensure_key_usage(&map, "recipient")?;
+    let implementation = KeyImplementation::from_label(required_field(&map, "implementation")?)?;
+    let algorithm = KemAlgorithm::from_str(required_field(&map, "algorithm")?)?;
+    let key_id = required_field(&map, "key_id")?.to_string();
+    let method_name = determine_kem_method_name(implementation, algorithm, &map)?.to_string();
+    validate_kem_method_name(implementation, algorithm, &method_name)?;
+    let fingerprint = parse_fixed_32(required_field(&map, "public_key_fingerprint")?)?;
+    let public_key_bytes = parse_kem_public_key_blob(implementation, algorithm, &map)?;
+    let secret_key_bytes = parse_kem_private_key_blob(implementation, algorithm, &map)?;
+    let algorithm_version = optional_field(&map, "algorithm_version").map(str::to_string);
+    let library_version = optional_field(&map, "library_version").map(str::to_string);
+
+    let derived =
+        derive_kem_fingerprint(implementation, algorithm, &method_name, &public_key_bytes)?;
+    if derived != fingerprint {
+        return Err(QsrlError::KeyRejected(
+            "recipient private key fingerprint did not match the encoded public key bytes".into(),
+        ));
+    }
+
+    Ok(KemPrivateKey {
+        algorithm,
+        key_id,
+        public_key_fingerprint: fingerprint,
+        implementation,
+        method_name,
+        algorithm_version,
+        library_version,
+        public_key_bytes,
+        secret_key_bytes,
+    })
+}
+
+pub fn load_recipient_public_key(path: &Path) -> Result<KemPublicKey> {
+    let map = parse_key_file(path)?;
+    ensure_key_type(&map, "public")?;
+    ensure_key_usage(&map, "recipient")?;
+    let implementation = KeyImplementation::from_label(required_field(&map, "implementation")?)?;
+    let algorithm = KemAlgorithm::from_str(required_field(&map, "algorithm")?)?;
+    let key_id = required_field(&map, "key_id")?.to_string();
+    let method_name = determine_kem_method_name(implementation, algorithm, &map)?.to_string();
+    validate_kem_method_name(implementation, algorithm, &method_name)?;
+    let fingerprint = parse_fixed_32(required_field(&map, "public_key_fingerprint")?)?;
+    let public_key_bytes = parse_kem_public_key_blob(implementation, algorithm, &map)?;
+    let algorithm_version = optional_field(&map, "algorithm_version").map(str::to_string);
+    let library_version = optional_field(&map, "library_version").map(str::to_string);
+
+    let derived =
+        derive_kem_fingerprint(implementation, algorithm, &method_name, &public_key_bytes)?;
+    if derived != fingerprint {
+        return Err(QsrlError::KeyRejected(
+            "recipient public key fingerprint did not match the encoded public key bytes".into(),
+        ));
+    }
+
+    Ok(KemPublicKey {
         algorithm,
         key_id,
         fingerprint,
@@ -393,6 +665,51 @@ fn verify_stub_signature(public_key: &PublicKey, message: &[u8], signature: &[u8
     Ok(())
 }
 
+fn generate_liboqs_kem_keypair(
+    algorithm: KemAlgorithm,
+    key_id: String,
+) -> Result<(KemPrivateKey, KemPublicKey)> {
+    #[cfg(feature = "liboqs-backend")]
+    {
+        let method_name = liboqs_kem_method_name_for_algorithm(algorithm).to_string();
+        let kem = liboqs::KemScheme::new(&method_name)?;
+        let (public_key_bytes, secret_key_bytes) = kem.keypair()?;
+        let fingerprint = derive_liboqs_kem_fingerprint(algorithm, &method_name, &public_key_bytes);
+        let algorithm_version = Some(kem.algorithm_version());
+        let library_version = Some(kem.library_version());
+        let private_key = KemPrivateKey {
+            algorithm,
+            key_id: key_id.clone(),
+            public_key_fingerprint: fingerprint,
+            implementation: KeyImplementation::LiboqsSystemV1,
+            method_name: method_name.clone(),
+            algorithm_version: algorithm_version.clone(),
+            library_version: library_version.clone(),
+            public_key_bytes: public_key_bytes.clone(),
+            secret_key_bytes,
+        };
+        let public_key = KemPublicKey {
+            algorithm,
+            key_id,
+            fingerprint,
+            implementation: KeyImplementation::LiboqsSystemV1,
+            method_name,
+            algorithm_version,
+            library_version,
+            public_key_bytes,
+        };
+        Ok((private_key, public_key))
+    }
+    #[cfg(not(feature = "liboqs-backend"))]
+    {
+        let _ = algorithm;
+        let _ = key_id;
+        Err(QsrlError::UnsupportedFeature(
+            "this build does not include the liboqs backend".into(),
+        ))
+    }
+}
+
 fn generate_liboqs_keypair(
     algorithm: SignatureAlgorithm,
     key_id: String,
@@ -484,6 +801,106 @@ fn verify_liboqs_signature(public_key: &PublicKey, message: &[u8], signature: &[
     }
 }
 
+fn wrap_archive_key_liboqs(
+    public_key: &KemPublicKey,
+    archive_key: &[u8],
+) -> Result<RecipientRecord> {
+    #[cfg(feature = "liboqs-backend")]
+    {
+        validate_kem_method_name(
+            public_key.implementation,
+            public_key.algorithm,
+            &public_key.method_name,
+        )?;
+        let kem = liboqs::KemScheme::new(&public_key.method_name)?;
+        let (kem_ciphertext, shared_secret) = kem.encaps(&public_key.public_key_bytes)?;
+        let wrap_key = derive_wrap_key(&shared_secret, &public_key.fingerprint);
+        let wrap_nonce = read_random_bytes(AEAD_NONCE_LEN)?;
+        let wrap_aad = recipient_wrap_aad(&public_key.fingerprint, &kem_ciphertext);
+        let (wrapped_key, wrap_tag) = encrypt_aead(&wrap_key, &wrap_nonce, &wrap_aad, archive_key)?;
+        Ok(RecipientRecord {
+            implementation: public_key.implementation_code(),
+            public_key_fingerprint: public_key.fingerprint,
+            kem_ciphertext,
+            wrap_nonce,
+            wrapped_key,
+            wrap_tag,
+        })
+    }
+    #[cfg(not(feature = "liboqs-backend"))]
+    {
+        let _ = public_key;
+        let _ = archive_key;
+        Err(QsrlError::UnsupportedFeature(
+            "this build does not include the liboqs backend".into(),
+        ))
+    }
+}
+
+fn unwrap_archive_key_liboqs(
+    private_key: &KemPrivateKey,
+    record: &RecipientRecord,
+) -> Result<Vec<u8>> {
+    #[cfg(feature = "liboqs-backend")]
+    {
+        if record.implementation != private_key.implementation_code() {
+            return Err(QsrlError::KeyRejected(
+                "recipient record backend does not match the provided private key".into(),
+            ));
+        }
+        if record.public_key_fingerprint != private_key.public_key_fingerprint {
+            return Err(QsrlError::KeyRejected(
+                "recipient private key does not match any recipient record in this archive".into(),
+            ));
+        }
+        validate_kem_method_name(
+            private_key.implementation,
+            private_key.algorithm,
+            &private_key.method_name,
+        )?;
+        let kem = liboqs::KemScheme::new(&private_key.method_name)?;
+        let shared_secret = kem.decaps(&record.kem_ciphertext, &private_key.secret_key_bytes)?;
+        let wrap_key = derive_wrap_key(&shared_secret, &private_key.public_key_fingerprint);
+        let wrap_aad =
+            recipient_wrap_aad(&private_key.public_key_fingerprint, &record.kem_ciphertext);
+        decrypt_aead(
+            &wrap_key,
+            &record.wrap_nonce,
+            &wrap_aad,
+            &record.wrapped_key,
+            &record.wrap_tag,
+        )
+        .map_err(|error| match error {
+            QsrlError::DataCorruption(_) => QsrlError::KeyRejected(
+                "recipient private key could not unwrap the archive key for this record".into(),
+            ),
+            other => other,
+        })
+    }
+    #[cfg(not(feature = "liboqs-backend"))]
+    {
+        let _ = private_key;
+        let _ = record;
+        Err(QsrlError::UnsupportedFeature(
+            "this build does not include the liboqs backend".into(),
+        ))
+    }
+}
+
+#[cfg(feature = "liboqs-backend")]
+fn derive_wrap_key(shared_secret: &[u8], fingerprint: &[u8; 32]) -> [u8; 32] {
+    digest_parts(&[b"QSRL-RECIPIENT-WRAP-KEY", shared_secret, fingerprint])
+}
+
+#[cfg(feature = "liboqs-backend")]
+fn recipient_wrap_aad(fingerprint: &[u8; 32], kem_ciphertext: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(24 + fingerprint.len() + kem_ciphertext.len());
+    aad.extend_from_slice(b"QSRL-RECIPIENT-WRAP-AAD");
+    aad.extend_from_slice(fingerprint);
+    aad.extend_from_slice(kem_ciphertext);
+    aad
+}
+
 fn derive_fingerprint(
     implementation: KeyImplementation,
     algorithm: SignatureAlgorithm,
@@ -513,6 +930,37 @@ fn derive_liboqs_fingerprint(
 ) -> [u8; 32] {
     digest_parts(&[
         b"QSRL-LIBOQS-FINGERPRINT",
+        algorithm.as_str().as_bytes(),
+        method_name.as_bytes(),
+        public_key_bytes,
+    ])
+}
+
+fn derive_kem_fingerprint(
+    implementation: KeyImplementation,
+    algorithm: KemAlgorithm,
+    method_name: &str,
+    public_key_bytes: &[u8],
+) -> Result<[u8; 32]> {
+    Ok(match implementation {
+        KeyImplementation::LiboqsSystemV1 => {
+            derive_liboqs_kem_fingerprint(algorithm, method_name, public_key_bytes)
+        }
+        KeyImplementation::StubLamportV1 => {
+            return Err(QsrlError::UnsupportedFeature(
+                "recipient encryption is not available with the stub backend".into(),
+            ));
+        }
+    })
+}
+
+fn derive_liboqs_kem_fingerprint(
+    algorithm: KemAlgorithm,
+    method_name: &str,
+    public_key_bytes: &[u8],
+) -> [u8; 32] {
+    digest_parts(&[
+        b"QSRL-LIBOQS-KEM-FINGERPRINT",
         algorithm.as_str().as_bytes(),
         method_name.as_bytes(),
         public_key_bytes,
@@ -559,6 +1007,16 @@ fn ensure_key_type(fields: &BTreeMap<String, String>, expected_type: &str) -> Re
     Ok(())
 }
 
+fn ensure_key_usage(fields: &BTreeMap<String, String>, expected_usage: &str) -> Result<()> {
+    let actual = required_field(fields, "usage")?;
+    if actual != expected_usage {
+        return Err(QsrlError::KeyRejected(format!(
+            "expected a {expected_usage} key file but found usage '{actual}'"
+        )));
+    }
+    Ok(())
+}
+
 fn determine_method_name<'a>(
     implementation: KeyImplementation,
     algorithm: SignatureAlgorithm,
@@ -571,6 +1029,22 @@ fn determine_method_name<'a>(
         KeyImplementation::StubLamportV1 => Ok(stub_method_name(algorithm)),
         KeyImplementation::LiboqsSystemV1 => Err(QsrlError::Parse(
             "liboqs-backed keys must include a method_name field".into(),
+        )),
+    }
+}
+
+fn determine_kem_method_name<'a>(
+    implementation: KeyImplementation,
+    algorithm: KemAlgorithm,
+    fields: &'a BTreeMap<String, String>,
+) -> Result<&'a str> {
+    if let Some(value) = optional_field(fields, "method_name") {
+        return Ok(value);
+    }
+    match implementation {
+        KeyImplementation::LiboqsSystemV1 => Ok(liboqs_kem_method_name_for_algorithm(algorithm)),
+        KeyImplementation::StubLamportV1 => Err(QsrlError::Parse(
+            "recipient keys do not support the stub backend".into(),
         )),
     }
 }
@@ -601,6 +1075,25 @@ fn validate_method_name(
                 )))
             }
         },
+    }
+}
+
+fn validate_kem_method_name(
+    implementation: KeyImplementation,
+    algorithm: KemAlgorithm,
+    method_name: &str,
+) -> Result<()> {
+    match implementation {
+        KeyImplementation::LiboqsSystemV1 => match algorithm {
+            KemAlgorithm::MlKem if method_name.starts_with("ML-KEM-") => Ok(()),
+            KemAlgorithm::MlKem => Err(QsrlError::KeyRejected(format!(
+                "method_name '{method_name}' does not match algorithm family {}",
+                algorithm.as_str()
+            ))),
+        },
+        KeyImplementation::StubLamportV1 => Err(QsrlError::KeyRejected(
+            "recipient encryption is not available with the stub backend".into(),
+        )),
     }
 }
 
@@ -638,6 +1131,26 @@ fn parse_private_key_blob(
     Ok(bytes)
 }
 
+fn parse_kem_public_key_blob(
+    implementation: KeyImplementation,
+    algorithm: KemAlgorithm,
+    fields: &BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let bytes = hex_decode(required_field(fields, "public_key")?)?;
+    validate_kem_key_blob_lengths(implementation, algorithm, &bytes, false)?;
+    Ok(bytes)
+}
+
+fn parse_kem_private_key_blob(
+    implementation: KeyImplementation,
+    algorithm: KemAlgorithm,
+    fields: &BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let bytes = hex_decode(required_field(fields, "secret_key")?)?;
+    validate_kem_key_blob_lengths(implementation, algorithm, &bytes, true)?;
+    Ok(bytes)
+}
+
 fn validate_key_blob_lengths(
     implementation: KeyImplementation,
     algorithm: SignatureAlgorithm,
@@ -670,6 +1183,29 @@ fn validate_key_blob_lengths(
             }
             Ok(())
         }
+    }
+}
+
+fn validate_kem_key_blob_lengths(
+    implementation: KeyImplementation,
+    algorithm: KemAlgorithm,
+    bytes: &[u8],
+    private: bool,
+) -> Result<()> {
+    match implementation {
+        KeyImplementation::LiboqsSystemV1 => {
+            let _ = algorithm;
+            if bytes.is_empty() {
+                return Err(QsrlError::Parse(format!(
+                    "liboqs {} recipient key bytes must not be empty",
+                    if private { "private" } else { "public" }
+                )));
+            }
+            Ok(())
+        }
+        KeyImplementation::StubLamportV1 => Err(QsrlError::Parse(
+            "recipient encryption is not available with the stub backend".into(),
+        )),
     }
 }
 
@@ -743,6 +1279,20 @@ fn liboqs_method_name_for_algorithm(algorithm: SignatureAlgorithm) -> &'static s
 }
 
 #[cfg(feature = "liboqs-backend")]
+fn liboqs_kem_method_name_for_algorithm(algorithm: KemAlgorithm) -> &'static str {
+    match algorithm {
+        KemAlgorithm::MlKem => LIBOQS_METHOD_NAME_ML_KEM,
+    }
+}
+
+#[cfg(not(feature = "liboqs-backend"))]
+fn liboqs_kem_method_name_for_algorithm(algorithm: KemAlgorithm) -> &'static str {
+    match algorithm {
+        KemAlgorithm::MlKem => "ML-KEM-768",
+    }
+}
+
+#[cfg(feature = "liboqs-backend")]
 mod liboqs {
     use std::ffi::{CStr, CString};
     use std::os::raw::{c_char, c_int};
@@ -793,6 +1343,26 @@ mod liboqs {
         >,
     }
 
+    #[repr(C)]
+    struct RawKem {
+        method_name: *const c_char,
+        alg_version: *const c_char,
+        claimed_nist_level: u8,
+        ind_cca: u8,
+        length_public_key: usize,
+        length_secret_key: usize,
+        length_ciphertext: usize,
+        length_shared_secret: usize,
+        length_keypair_seed: usize,
+        length_encaps_seed: usize,
+        keypair_derand: Option<unsafe extern "C" fn(*mut u8, *mut u8, *const u8) -> c_int>,
+        keypair: Option<unsafe extern "C" fn(*mut u8, *mut u8) -> c_int>,
+        encaps_derand:
+            Option<unsafe extern "C" fn(*mut u8, *mut u8, *const u8, *const u8) -> c_int>,
+        encaps: Option<unsafe extern "C" fn(*mut u8, *mut u8, *const u8) -> c_int>,
+        decaps: Option<unsafe extern "C" fn(*mut u8, *const u8, *const u8) -> c_int>,
+    }
+
     unsafe extern "C" {
         fn OQS_init();
         fn OQS_version() -> *const c_char;
@@ -816,12 +1386,32 @@ mod liboqs {
             signature_len: usize,
             public_key: *const u8,
         ) -> c_int;
+        fn OQS_KEM_alg_is_enabled(method_name: *const c_char) -> c_int;
+        fn OQS_KEM_new(method_name: *const c_char) -> *mut RawKem;
+        fn OQS_KEM_free(kem: *mut RawKem);
+        fn OQS_KEM_keypair(kem: *const RawKem, public_key: *mut u8, secret_key: *mut u8) -> c_int;
+        fn OQS_KEM_encaps(
+            kem: *const RawKem,
+            ciphertext: *mut u8,
+            shared_secret: *mut u8,
+            public_key: *const u8,
+        ) -> c_int;
+        fn OQS_KEM_decaps(
+            kem: *const RawKem,
+            shared_secret: *mut u8,
+            ciphertext: *const u8,
+            secret_key: *const u8,
+        ) -> c_int;
     }
 
     static INIT: Once = Once::new();
 
     pub struct SignatureScheme {
         sig: NonNull<RawSig>,
+    }
+
+    pub struct KemScheme {
+        kem: NonNull<RawKem>,
     }
 
     impl SignatureScheme {
@@ -928,15 +1518,134 @@ mod liboqs {
         }
     }
 
+    impl KemScheme {
+        pub fn new(method_name: &str) -> Result<Self> {
+            init_once();
+            let method_name_c = CString::new(method_name)
+                .map_err(|_| QsrlError::Parse("liboqs method name contained a NUL byte".into()))?;
+            let enabled = unsafe { OQS_KEM_alg_is_enabled(method_name_c.as_ptr()) };
+            if enabled != 1 {
+                return Err(QsrlError::UnsupportedFeature(format!(
+                    "liboqs does not have KEM method '{method_name}' enabled"
+                )));
+            }
+            let kem = unsafe { OQS_KEM_new(method_name_c.as_ptr()) };
+            let kem = NonNull::new(kem).ok_or_else(|| {
+                QsrlError::UnsupportedFeature(format!(
+                    "liboqs could not construct KEM method '{method_name}'"
+                ))
+            })?;
+            Ok(Self { kem })
+        }
+
+        pub fn keypair(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+            let kem = self.raw();
+            let mut public_key = vec![0u8; kem.length_public_key];
+            let mut secret_key = vec![0u8; kem.length_secret_key];
+            oqs_result(
+                unsafe {
+                    OQS_KEM_keypair(
+                        self.kem.as_ptr(),
+                        public_key.as_mut_ptr(),
+                        secret_key.as_mut_ptr(),
+                    )
+                },
+                "generating liboqs recipient keypair",
+            )?;
+            Ok((public_key, secret_key))
+        }
+
+        pub fn encaps(&self, public_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+            let kem = self.raw();
+            if public_key.len() != kem.length_public_key {
+                return Err(QsrlError::KeyRejected(format!(
+                    "public key length {} did not match liboqs KEM expectation {}",
+                    public_key.len(),
+                    kem.length_public_key
+                )));
+            }
+            let mut ciphertext = vec![0u8; kem.length_ciphertext];
+            let mut shared_secret = vec![0u8; kem.length_shared_secret];
+            oqs_result(
+                unsafe {
+                    OQS_KEM_encaps(
+                        self.kem.as_ptr(),
+                        ciphertext.as_mut_ptr(),
+                        shared_secret.as_mut_ptr(),
+                        public_key.as_ptr(),
+                    )
+                },
+                "encapsulating archive key for recipient",
+            )?;
+            Ok((ciphertext, shared_secret))
+        }
+
+        pub fn decaps(&self, ciphertext: &[u8], secret_key: &[u8]) -> Result<Vec<u8>> {
+            let kem = self.raw();
+            if ciphertext.len() != kem.length_ciphertext {
+                return Err(QsrlError::KeyRejected(format!(
+                    "recipient ciphertext length {} did not match liboqs KEM expectation {}",
+                    ciphertext.len(),
+                    kem.length_ciphertext
+                )));
+            }
+            if secret_key.len() != kem.length_secret_key {
+                return Err(QsrlError::KeyRejected(format!(
+                    "secret key length {} did not match liboqs KEM expectation {}",
+                    secret_key.len(),
+                    kem.length_secret_key
+                )));
+            }
+            let mut shared_secret = vec![0u8; kem.length_shared_secret];
+            oqs_result(
+                unsafe {
+                    OQS_KEM_decaps(
+                        self.kem.as_ptr(),
+                        shared_secret.as_mut_ptr(),
+                        ciphertext.as_ptr(),
+                        secret_key.as_ptr(),
+                    )
+                },
+                "decapsulating archive key for recipient",
+            )
+            .map_err(|_| {
+                QsrlError::KeyRejected(
+                    "recipient private key could not decapsulate this archive record".into(),
+                )
+            })?;
+            Ok(shared_secret)
+        }
+
+        pub fn algorithm_version(&self) -> String {
+            c_string(self.raw().alg_version)
+        }
+
+        pub fn library_version(&self) -> String {
+            unsafe { c_string(OQS_version()) }
+        }
+    }
+
     impl Drop for SignatureScheme {
         fn drop(&mut self) {
             unsafe { OQS_SIG_free(self.sig.as_ptr()) };
         }
     }
 
+    impl Drop for KemScheme {
+        fn drop(&mut self) {
+            unsafe { OQS_KEM_free(self.kem.as_ptr()) };
+        }
+    }
+
     impl SignatureScheme {
         fn raw(&self) -> &RawSig {
             unsafe { self.sig.as_ref() }
+        }
+    }
+
+    impl KemScheme {
+        fn raw(&self) -> &RawKem {
+            unsafe { self.kem.as_ref() }
         }
     }
 
@@ -960,6 +1669,352 @@ mod liboqs {
             .to_str()
             .unwrap_or_default()
             .to_string()
+    }
+}
+
+#[cfg(feature = "liboqs-backend")]
+mod openssl_aead {
+    use std::os::raw::{c_int, c_void};
+    use std::ptr::NonNull;
+
+    use crate::crypto::{AEAD_NONCE_LEN, AEAD_TAG_LEN, ARCHIVE_KEY_LEN};
+    use crate::error::{QsrlError, Result};
+
+    const EVP_CTRL_GCM_SET_IVLEN: c_int = 0x9;
+    const EVP_CTRL_GCM_GET_TAG: c_int = 0x10;
+    const EVP_CTRL_GCM_SET_TAG: c_int = 0x11;
+
+    #[repr(C)]
+    struct EvpCipher {
+        _private: [u8; 0],
+    }
+
+    #[repr(C)]
+    struct EvpCipherCtx {
+        _private: [u8; 0],
+    }
+
+    unsafe extern "C" {
+        fn EVP_aes_256_gcm() -> *const EvpCipher;
+        fn EVP_CIPHER_CTX_new() -> *mut EvpCipherCtx;
+        fn EVP_CIPHER_CTX_free(ctx: *mut EvpCipherCtx);
+        fn EVP_EncryptInit_ex(
+            ctx: *mut EvpCipherCtx,
+            cipher: *const EvpCipher,
+            engine: *mut c_void,
+            key: *const u8,
+            iv: *const u8,
+        ) -> c_int;
+        fn EVP_EncryptUpdate(
+            ctx: *mut EvpCipherCtx,
+            out: *mut u8,
+            out_len: *mut c_int,
+            in_: *const u8,
+            in_len: c_int,
+        ) -> c_int;
+        fn EVP_EncryptFinal_ex(ctx: *mut EvpCipherCtx, out: *mut u8, out_len: *mut c_int) -> c_int;
+        fn EVP_DecryptInit_ex(
+            ctx: *mut EvpCipherCtx,
+            cipher: *const EvpCipher,
+            engine: *mut c_void,
+            key: *const u8,
+            iv: *const u8,
+        ) -> c_int;
+        fn EVP_DecryptUpdate(
+            ctx: *mut EvpCipherCtx,
+            out: *mut u8,
+            out_len: *mut c_int,
+            in_: *const u8,
+            in_len: c_int,
+        ) -> c_int;
+        fn EVP_DecryptFinal_ex(ctx: *mut EvpCipherCtx, outm: *mut u8, out_len: *mut c_int)
+        -> c_int;
+        fn EVP_CIPHER_CTX_ctrl(
+            ctx: *mut EvpCipherCtx,
+            type_: c_int,
+            arg: c_int,
+            ptr: *mut c_void,
+        ) -> c_int;
+    }
+
+    pub fn encrypt_aes_256_gcm(
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        validate_lengths(key, nonce)?;
+        let ctx = CipherCtx::new()?;
+        let cipher = unsafe { EVP_aes_256_gcm() };
+        if cipher.is_null() {
+            return Err(QsrlError::UnsupportedFeature(
+                "OpenSSL AES-256-GCM cipher is unavailable".into(),
+            ));
+        }
+
+        openssl_ok(
+            unsafe {
+                EVP_EncryptInit_ex(
+                    ctx.as_ptr(),
+                    cipher,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            "initializing AES-256-GCM",
+        )?;
+        openssl_ok(
+            unsafe {
+                EVP_CIPHER_CTX_ctrl(
+                    ctx.as_ptr(),
+                    EVP_CTRL_GCM_SET_IVLEN,
+                    nonce.len() as c_int,
+                    std::ptr::null_mut(),
+                )
+            },
+            "configuring AES-256-GCM nonce length",
+        )?;
+        openssl_ok(
+            unsafe {
+                EVP_EncryptInit_ex(
+                    ctx.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    key.as_ptr(),
+                    nonce.as_ptr(),
+                )
+            },
+            "setting AES-256-GCM key and nonce",
+        )?;
+
+        if !aad.is_empty() {
+            let mut aad_len = 0;
+            openssl_ok(
+                unsafe {
+                    EVP_EncryptUpdate(
+                        ctx.as_ptr(),
+                        std::ptr::null_mut(),
+                        &mut aad_len,
+                        aad.as_ptr(),
+                        to_c_int(aad.len(), "AEAD AAD length")?,
+                    )
+                },
+                "processing AES-256-GCM AAD",
+            )?;
+        }
+
+        let mut ciphertext = vec![0u8; plaintext.len() + AEAD_TAG_LEN];
+        let mut ciphertext_len = 0;
+        openssl_ok(
+            unsafe {
+                EVP_EncryptUpdate(
+                    ctx.as_ptr(),
+                    ciphertext.as_mut_ptr(),
+                    &mut ciphertext_len,
+                    plaintext.as_ptr(),
+                    to_c_int(plaintext.len(), "AEAD plaintext length")?,
+                )
+            },
+            "encrypting AES-256-GCM payload",
+        )?;
+        let mut final_len = 0;
+        openssl_ok(
+            unsafe {
+                EVP_EncryptFinal_ex(
+                    ctx.as_ptr(),
+                    ciphertext[ciphertext_len as usize..].as_mut_ptr(),
+                    &mut final_len,
+                )
+            },
+            "finalizing AES-256-GCM encryption",
+        )?;
+        ciphertext.truncate((ciphertext_len + final_len) as usize);
+
+        let mut tag = vec![0u8; AEAD_TAG_LEN];
+        openssl_ok(
+            unsafe {
+                EVP_CIPHER_CTX_ctrl(
+                    ctx.as_ptr(),
+                    EVP_CTRL_GCM_GET_TAG,
+                    AEAD_TAG_LEN as c_int,
+                    tag.as_mut_ptr().cast::<c_void>(),
+                )
+            },
+            "reading AES-256-GCM tag",
+        )?;
+        Ok((ciphertext, tag))
+    }
+
+    pub fn decrypt_aes_256_gcm(
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        ciphertext: &[u8],
+        tag: &[u8],
+    ) -> Result<Vec<u8>> {
+        validate_lengths(key, nonce)?;
+        if tag.len() != AEAD_TAG_LEN {
+            return Err(QsrlError::DataCorruption(format!(
+                "AEAD tag length {} did not match expected {AEAD_TAG_LEN}",
+                tag.len()
+            )));
+        }
+        let ctx = CipherCtx::new()?;
+        let cipher = unsafe { EVP_aes_256_gcm() };
+        if cipher.is_null() {
+            return Err(QsrlError::UnsupportedFeature(
+                "OpenSSL AES-256-GCM cipher is unavailable".into(),
+            ));
+        }
+
+        openssl_ok(
+            unsafe {
+                EVP_DecryptInit_ex(
+                    ctx.as_ptr(),
+                    cipher,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            "initializing AES-256-GCM decryption",
+        )?;
+        openssl_ok(
+            unsafe {
+                EVP_CIPHER_CTX_ctrl(
+                    ctx.as_ptr(),
+                    EVP_CTRL_GCM_SET_IVLEN,
+                    nonce.len() as c_int,
+                    std::ptr::null_mut(),
+                )
+            },
+            "configuring AES-256-GCM nonce length",
+        )?;
+        openssl_ok(
+            unsafe {
+                EVP_DecryptInit_ex(
+                    ctx.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    key.as_ptr(),
+                    nonce.as_ptr(),
+                )
+            },
+            "setting AES-256-GCM key and nonce",
+        )?;
+
+        if !aad.is_empty() {
+            let mut aad_len = 0;
+            openssl_ok(
+                unsafe {
+                    EVP_DecryptUpdate(
+                        ctx.as_ptr(),
+                        std::ptr::null_mut(),
+                        &mut aad_len,
+                        aad.as_ptr(),
+                        to_c_int(aad.len(), "AEAD AAD length")?,
+                    )
+                },
+                "processing AES-256-GCM AAD",
+            )?;
+        }
+
+        let mut plaintext = vec![0u8; ciphertext.len()];
+        let mut plaintext_len = 0;
+        openssl_ok(
+            unsafe {
+                EVP_DecryptUpdate(
+                    ctx.as_ptr(),
+                    plaintext.as_mut_ptr(),
+                    &mut plaintext_len,
+                    ciphertext.as_ptr(),
+                    to_c_int(ciphertext.len(), "AEAD ciphertext length")?,
+                )
+            },
+            "decrypting AES-256-GCM payload",
+        )?;
+
+        let mut tag_copy = tag.to_vec();
+        openssl_ok(
+            unsafe {
+                EVP_CIPHER_CTX_ctrl(
+                    ctx.as_ptr(),
+                    EVP_CTRL_GCM_SET_TAG,
+                    AEAD_TAG_LEN as c_int,
+                    tag_copy.as_mut_ptr().cast::<c_void>(),
+                )
+            },
+            "setting AES-256-GCM tag",
+        )?;
+
+        let mut final_len = 0;
+        let status = unsafe {
+            EVP_DecryptFinal_ex(
+                ctx.as_ptr(),
+                plaintext[plaintext_len as usize..].as_mut_ptr(),
+                &mut final_len,
+            )
+        };
+        if status != 1 {
+            return Err(QsrlError::DataCorruption(
+                "AES-256-GCM rejected the ciphertext or authentication tag".into(),
+            ));
+        }
+        plaintext.truncate((plaintext_len + final_len) as usize);
+        Ok(plaintext)
+    }
+
+    struct CipherCtx(NonNull<EvpCipherCtx>);
+
+    impl CipherCtx {
+        fn new() -> Result<Self> {
+            let ctx = unsafe { EVP_CIPHER_CTX_new() };
+            let ctx = NonNull::new(ctx).ok_or_else(|| {
+                QsrlError::UnsupportedFeature("OpenSSL could not allocate an AEAD context".into())
+            })?;
+            Ok(Self(ctx))
+        }
+
+        fn as_ptr(&self) -> *mut EvpCipherCtx {
+            self.0.as_ptr()
+        }
+    }
+
+    impl Drop for CipherCtx {
+        fn drop(&mut self) {
+            unsafe { EVP_CIPHER_CTX_free(self.0.as_ptr()) };
+        }
+    }
+
+    fn validate_lengths(key: &[u8], nonce: &[u8]) -> Result<()> {
+        if key.len() != ARCHIVE_KEY_LEN {
+            return Err(QsrlError::UnsupportedFeature(format!(
+                "AEAD key length {} did not match expected {ARCHIVE_KEY_LEN}",
+                key.len()
+            )));
+        }
+        if nonce.len() != AEAD_NONCE_LEN {
+            return Err(QsrlError::UnsupportedFeature(format!(
+                "AEAD nonce length {} did not match expected {AEAD_NONCE_LEN}",
+                nonce.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn openssl_ok(status: c_int, context: &str) -> Result<()> {
+        if status == 1 {
+            Ok(())
+        } else {
+            Err(QsrlError::UnsupportedFeature(context.into()))
+        }
+    }
+
+    fn to_c_int(value: usize, context: &str) -> Result<c_int> {
+        c_int::try_from(value).map_err(|_| {
+            QsrlError::UnsupportedFeature(format!("{context} overflowed OpenSSL c_int"))
+        })
     }
 }
 
