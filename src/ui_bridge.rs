@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::{Archive, default_detached_signature_path};
 use crate::commands::{
-    self, SettingsOverrides, extract_archive_with_recipient, pack_archive_with_recipients,
-    sign_archive, verify_archive_signature,
+    self, SettingsOverrides, extract_archive_with_recipient, keygen, pack_archive_with_recipients,
+    recipient_keygen, sign_archive, verify_archive_signature,
 };
 use crate::error::{QsrlError, Result};
 use crate::protocol::{
-    CompressionLayout, CompressionMode, ManifestEncoding, SignatureAlgorithm, SignaturePlacement,
+    CompressionLayout, CompressionMode, KemAlgorithm, ManifestEncoding, SignatureAlgorithm,
+    SignaturePlacement,
 };
 use crate::util::{collect_input_files, hex_encode};
 
@@ -49,6 +50,29 @@ pub struct InspectRequest {
     pub archive_path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeygenAlgorithm {
+    MlDsa,
+    SlhDsa,
+    MlKemRecipient,
+}
+
+impl KeygenAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MlDsa => "ml-dsa",
+            Self::SlhDsa => "slh-dsa",
+            Self::MlKemRecipient => "ml-kem",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct KeygenRequest {
+    pub output_root: PathBuf,
+    pub algorithm: KeygenAlgorithm,
+}
+
 #[derive(Clone, Debug)]
 pub struct VerifyReport {
     pub archive_path: PathBuf,
@@ -84,6 +108,16 @@ pub struct InspectReport {
     pub aead_method: Option<String>,
     pub signature_status: String,
     pub files: Vec<InspectFileSummary>,
+    pub log: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct KeygenReport {
+    pub output_root: PathBuf,
+    pub keys_dir: PathBuf,
+    pub algorithm: KeygenAlgorithm,
+    pub private_key_path: PathBuf,
+    pub public_key_path: PathBuf,
     pub log: String,
 }
 
@@ -139,6 +173,17 @@ pub fn validate_inspect_request(request: &InspectRequest) -> Result<()> {
     ensure_existing_file(&request.archive_path, "archive file")
 }
 
+pub fn validate_keygen_request(request: &KeygenRequest) -> Result<()> {
+    ensure_non_empty_path(&request.output_root, "output root")?;
+    if request.output_root.exists() && !request.output_root.is_dir() {
+        return Err(QsrlError::Usage(format!(
+            "output root points to a file: {}",
+            request.output_root.display()
+        )));
+    }
+    Ok(())
+}
+
 pub fn run_pack(request: &PackRequest) -> Result<String> {
     validate_pack_request(request)?;
     pack_archive_with_recipients(
@@ -152,6 +197,28 @@ pub fn run_pack(request: &PackRequest) -> Result<String> {
 
 pub fn pack_input_file_count(input_path: &Path) -> Result<usize> {
     Ok(collect_input_files(input_path)?.len())
+}
+
+pub fn run_keygen(request: &KeygenRequest) -> Result<KeygenReport> {
+    validate_keygen_request(request)?;
+    let log = match request.algorithm {
+        KeygenAlgorithm::MlDsa => keygen(&request.output_root, SignatureAlgorithm::MlDsa)?,
+        KeygenAlgorithm::SlhDsa => keygen(&request.output_root, SignatureAlgorithm::SlhDsa)?,
+        KeygenAlgorithm::MlKemRecipient => {
+            recipient_keygen(&request.output_root, KemAlgorithm::MlKem)?
+        }
+    };
+    let private_key_path = generated_key_path(&log, "private key: ")?;
+    let public_key_path = generated_key_path(&log, "public key: ")?;
+
+    Ok(KeygenReport {
+        output_root: request.output_root.clone(),
+        keys_dir: request.output_root.join("keys"),
+        algorithm: request.algorithm,
+        private_key_path,
+        public_key_path,
+        log,
+    })
 }
 
 pub fn run_sign(request: &SignRequest) -> Result<String> {
@@ -319,6 +386,14 @@ fn ensure_qsrl_output_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn generated_key_path(log: &str, prefix: &str) -> Result<PathBuf> {
+    let value = log
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .ok_or_else(|| QsrlError::Parse(format!("missing '{prefix}' in key generation output")))?;
+    Ok(PathBuf::from(value.trim()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +476,26 @@ mod tests {
 
         let count = pack_input_file_count(&root).expect("count input files");
         assert_eq!(count, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_keygen_creates_signature_keys_in_keys_directory() {
+        let root = temp_root("keygen");
+        fs::create_dir_all(&root).expect("create root");
+
+        let report = run_keygen(&KeygenRequest {
+            output_root: root.clone(),
+            algorithm: KeygenAlgorithm::MlDsa,
+        })
+        .expect("run keygen");
+
+        assert_eq!(report.algorithm, KeygenAlgorithm::MlDsa);
+        assert!(report.private_key_path.exists());
+        assert!(report.public_key_path.exists());
+        assert!(report.private_key_path.starts_with(root.join("keys")));
+        assert!(report.public_key_path.starts_with(root.join("keys")));
 
         let _ = fs::remove_dir_all(root);
     }

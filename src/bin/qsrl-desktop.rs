@@ -12,9 +12,10 @@ use qsrl::protocol::{
     CompressionLayout, CompressionMode, ManifestEncoding, SignatureAlgorithm, SignaturePlacement,
 };
 use qsrl::ui_bridge::{
-    ExtractRequest, InspectReport, InspectRequest, PackRequest, SignRequest, VerifyReport,
-    VerifyRequest, inspect_report, pack_input_file_count, run_extract, run_pack, run_sign,
-    validate_extract_request, validate_inspect_request, validate_pack_request,
+    ExtractRequest, InspectReport, InspectRequest, KeygenAlgorithm, KeygenReport, KeygenRequest,
+    PackRequest, SignRequest, VerifyReport, VerifyRequest, inspect_report, pack_input_file_count,
+    run_extract, run_keygen, run_pack, run_sign, validate_extract_request,
+    validate_inspect_request, validate_keygen_request, validate_pack_request,
     validate_sign_request, validate_verify_request, verify_report,
 };
 
@@ -38,6 +39,7 @@ fn main() -> eframe::Result<()> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Workflow {
     Pack,
+    Keygen,
     Sign,
     Verify,
     Extract,
@@ -48,6 +50,7 @@ impl Workflow {
     fn label(self) -> &'static str {
         match self {
             Self::Pack => "Pack",
+            Self::Keygen => "Keygen",
             Self::Sign => "Sign",
             Self::Verify => "Verify",
             Self::Extract => "Extract",
@@ -55,9 +58,10 @@ impl Workflow {
         }
     }
 
-    fn all() -> [Self; 5] {
+    fn all() -> [Self; 6] {
         [
             Self::Pack,
+            Self::Keygen,
             Self::Sign,
             Self::Verify,
             Self::Extract,
@@ -129,6 +133,21 @@ impl PackForm {
 }
 
 #[derive(Clone, Debug)]
+struct KeygenForm {
+    output_root: String,
+    algorithm: KeygenAlgorithm,
+}
+
+impl KeygenForm {
+    fn new(root: &Path) -> Self {
+        Self {
+            output_root: root.display().to_string(),
+            algorithm: KeygenAlgorithm::MlDsa,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct SignForm {
     archive_path: String,
     key_path: String,
@@ -170,6 +189,7 @@ struct InspectForm {
 
 enum TaskMessage {
     Pack(Result<String, String>),
+    Keygen(Result<KeygenReport, String>),
     Sign(Result<String, String>),
     Verify(Result<VerifyReport, String>),
     Extract(Result<String, String>),
@@ -182,10 +202,12 @@ struct QsrlDesktopApp {
     status: StatusBanner,
     log: String,
     pack_form: PackForm,
+    keygen_form: KeygenForm,
     sign_form: SignForm,
     verify_form: VerifyForm,
     extract_form: ExtractForm,
     inspect_form: InspectForm,
+    last_keygen: Option<KeygenReport>,
     last_verify: Option<VerifyReport>,
     last_inspect: Option<InspectReport>,
     pending_empty_pack_request: Option<PackRequest>,
@@ -224,10 +246,12 @@ impl QsrlDesktopApp {
                 root.display()
             ),
             pack_form: PackForm::from_config(&config),
+            keygen_form: KeygenForm::new(&root),
             sign_form: SignForm::from_config(&config),
             verify_form: VerifyForm::default(),
             extract_form: ExtractForm::default(),
             inspect_form: InspectForm::default(),
+            last_keygen: None,
             last_verify: None,
             last_inspect: None,
             pending_empty_pack_request: None,
@@ -290,6 +314,7 @@ impl QsrlDesktopApp {
     }
 
     fn launch_pack_task(&mut self, request: PackRequest) {
+        self.last_keygen = None;
         self.last_inspect = None;
         self.last_verify = None;
         let (sender, receiver) = mpsc::channel();
@@ -299,6 +324,28 @@ impl QsrlDesktopApp {
         thread::spawn(move || {
             let result = run_pack(&request).map_err(|error| error.to_string());
             let _ = sender.send(TaskMessage::Pack(result));
+        });
+    }
+
+    fn start_keygen(&mut self) {
+        let request = KeygenRequest {
+            output_root: PathBuf::from(self.keygen_form.output_root.trim()),
+            algorithm: self.keygen_form.algorithm,
+        };
+        if let Err(error) = validate_keygen_request(&request) {
+            self.finish_error("Key generation", error.to_string());
+            return;
+        }
+        self.last_keygen = None;
+        self.last_inspect = None;
+        self.last_verify = None;
+        let (sender, receiver) = mpsc::channel();
+        self.worker = Some(receiver);
+        self.pending_label = Some("Keygen");
+        self.status = info_banner("Key generation in progress...", &[]);
+        thread::spawn(move || {
+            let result = run_keygen(&request).map_err(|error| error.to_string());
+            let _ = sender.send(TaskMessage::Keygen(result));
         });
     }
 
@@ -396,6 +443,27 @@ impl QsrlDesktopApp {
                         TaskMessage::Pack(result) => match result {
                             Ok(log) => self.finish_success("Pack", log),
                             Err(error) => self.finish_error("Pack", error),
+                        },
+                        TaskMessage::Keygen(result) => match result {
+                            Ok(report) => {
+                                self.log = report.log.clone();
+                                self.status = StatusBanner {
+                                    kind: StatusKind::Success,
+                                    title: "Key generation completed successfully".into(),
+                                    detail_lines: vec![
+                                        format!("Algorithm: {}", report.algorithm.as_str()),
+                                        format!("Keys folder: {}", report.keys_dir.display()),
+                                        format!(
+                                            "Private key: {}",
+                                            report.private_key_path.display()
+                                        ),
+                                        format!("Public key: {}", report.public_key_path.display()),
+                                    ],
+                                    action: None,
+                                };
+                                self.last_keygen = Some(report);
+                            }
+                            Err(error) => self.finish_error("Key generation", error),
                         },
                         TaskMessage::Sign(result) => match result {
                             Ok(log) => self.finish_success("Sign", log),
@@ -496,10 +564,15 @@ impl QsrlDesktopApp {
             .resizable(false)
             .min_size(170.0)
             .show(ctx, |ui| {
-                ui.heading("QSRL Desktop");
+                let previous_workflow = self.active_workflow;
+                ui.heading("QSRL Desktop")
+                    .on_hover_text("Made by Steve Tippeconnic");
                 ui.separator();
                 for workflow in Workflow::all() {
                     ui.selectable_value(&mut self.active_workflow, workflow, workflow.label());
+                }
+                if previous_workflow != self.active_workflow && !self.is_busy() {
+                    self.status = StatusBanner::empty();
                 }
                 ui.separator();
                 ui.label(RichText::new("Workspace").strong());
@@ -548,7 +621,7 @@ impl QsrlDesktopApp {
 
     fn render_pack(&mut self, ui: &mut egui::Ui) {
         ui.heading("Pack");
-        ui.label("Package a folder into a .qsrl archive using the existing Rust archive logic.");
+        ui.label("Package a folder into a .qsrl archive.");
         ui.add_space(8.0);
 
         ui.add_enabled_ui(!self.is_busy(), |ui| {
@@ -658,6 +731,51 @@ impl QsrlDesktopApp {
                 });
             }
         });
+    }
+
+    fn render_keygen(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Key Generation");
+        ui.label("Generate local signing or recipient keys into a keys/ folder.");
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(!self.is_busy(), |ui| {
+            path_row_directory(
+                ui,
+                &self.root,
+                "Output root",
+                &mut self.keygen_form.output_root,
+            );
+            metadata_path_row(
+                ui,
+                "Keys folder",
+                &PathBuf::from(self.keygen_form.output_root.trim()).join("keys"),
+            );
+            enum_combo(
+                ui,
+                "Algorithm",
+                &mut self.keygen_form.algorithm,
+                &[
+                    (KeygenAlgorithm::MlDsa, "ml-dsa"),
+                    (KeygenAlgorithm::SlhDsa, "slh-dsa"),
+                    (KeygenAlgorithm::MlKemRecipient, "ml-kem"),
+                ],
+            );
+            ui.add_space(12.0);
+            if ui.button("Generate keypair").clicked() {
+                self.start_keygen();
+            }
+        });
+
+        if let Some(report) = &self.last_keygen {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.label(RichText::new("Generated key files").strong());
+            metadata_row(ui, "Algorithm", report.algorithm.as_str());
+            metadata_path_row(ui, "Output root", &report.output_root);
+            metadata_path_row(ui, "Keys folder", &report.keys_dir);
+            metadata_path_row(ui, "Private key", &report.private_key_path);
+            metadata_path_row(ui, "Public key", &report.public_key_path);
+        }
     }
 
     fn render_sign(&mut self, ui: &mut egui::Ui) {
@@ -911,11 +1029,12 @@ impl eframe::App for QsrlDesktopApp {
                         self.log.clear();
                     }
                 });
+                let mut selectable_log = self.log.clone();
                 ui.add(
-                    TextEdit::multiline(&mut self.log)
+                    TextEdit::multiline(&mut selectable_log)
                         .desired_rows(12)
                         .code_editor()
-                        .interactive(false),
+                        .desired_width(f32::INFINITY),
                 );
             });
 
@@ -924,6 +1043,7 @@ impl eframe::App for QsrlDesktopApp {
             ui.add_space(10.0);
             match self.active_workflow {
                 Workflow::Pack => self.render_pack(ui),
+                Workflow::Keygen => self.render_keygen(ui),
                 Workflow::Sign => self.render_sign(ui),
                 Workflow::Verify => self.render_verify(ui),
                 Workflow::Extract => self.render_extract(ui),
