@@ -10,8 +10,16 @@ build = "build.rs"
 [features]
 default = []
 liboqs-backend = []
+desktop-ui = ["dep:eframe", "dep:rfd"]
 
 [dependencies]
+eframe = { version = "0.34.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
+rfd = { version = "0.17.2", default-features = false, optional = true }
 
 [build-dependencies]
 pkg-config = "0.3"
+
+[[bin]]
+name = "qsrl-desktop"
+path = "src/bin/qsrl-desktop.rs"
+required-features = ["desktop-ui"]

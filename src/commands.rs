@@ -772,7 +772,7 @@ fn decrypt_archive_payload(archive: &Archive, recipient_key_path: &Path) -> Resu
     )
 }
 
-fn verify_archive_signature(
+pub(crate) fn verify_archive_signature(
     archive: &Archive,
     archive_path: &Path,
     public_key_path: &Path,

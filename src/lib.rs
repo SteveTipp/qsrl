@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod error;
 pub mod protocol;
 pub mod sha256;
+pub mod ui_bridge;
 pub mod util;
 
 pub const ARCHIVE_EXTENSION: &str = ".qsrl";

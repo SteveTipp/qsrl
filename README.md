@@ -43,6 +43,18 @@ export PKG_CONFIG_PATH="$LIBOQS_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 cargo test --features liboqs-backend
 ```
 
+Launch the local desktop UI on macOS:
+
+```bash
+cargo run --features desktop-ui --bin qsrl-desktop
+```
+
+Launch the local desktop UI with real `liboqs` signatures and ML-KEM support:
+
+```bash
+cargo run --features desktop-ui,liboqs-backend --bin qsrl-desktop
+```
+
 Initialize local defaults:
 
 ```bash
@@ -158,6 +170,27 @@ key metadata and handled inside the crypto backend.
 
 See [docs/crypto-backend.md](docs/crypto-backend.md)
 for setup steps, feature usage, and backend notes.
+
+## Local UI
+
+QSRL now includes a small local desktop app, `qsrl-desktop`, built with
+`egui/eframe`. It is a thin front end over the existing Rust archive, signing,
+verification, extraction, and inspection logic, and it keeps all file and key
+operations local on disk.
+
+What it can do:
+
+- pack archives with manifest and compression choices
+- sign archives with embedded or detached signatures
+- verify archives and show signature/hash status
+- extract signed or encrypted archives with optional keys
+- inspect archive metadata and file entries in a readable panel
+
+Notes:
+
+- The desktop UI is local-only and intended for private/demo use right now.
+- It does not add any network features, telemetry, accounts, or sync.
+- The existing `qsrl` CLI remains fully functional.
 
 ## Commands
 

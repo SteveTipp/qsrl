@@ -1,0 +1,999 @@
+use std::env;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
+
+use eframe::egui::{self, Color32, RichText, ScrollArea, TextEdit};
+use qsrl::commands::SettingsOverrides;
+use qsrl::config::RepoConfig;
+use qsrl::protocol::{
+    CompressionLayout, CompressionMode, ManifestEncoding, SignatureAlgorithm, SignaturePlacement,
+};
+use qsrl::ui_bridge::{
+    ExtractRequest, InspectReport, InspectRequest, PackRequest, SignRequest, VerifyReport,
+    VerifyRequest, inspect_report, run_extract, run_pack, run_sign, validate_extract_request,
+    validate_inspect_request, validate_pack_request, validate_sign_request,
+    validate_verify_request, verify_report,
+};
+
+fn main() -> eframe::Result<()> {
+    let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("QSRL Desktop")
+            .with_inner_size([1180.0, 820.0])
+            .with_min_inner_size([980.0, 680.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "QSRL Desktop",
+        native_options,
+        Box::new(move |_cc| Ok(Box::new(QsrlDesktopApp::new(root.clone())))),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Workflow {
+    Pack,
+    Sign,
+    Verify,
+    Extract,
+    Inspect,
+}
+
+impl Workflow {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pack => "Pack",
+            Self::Sign => "Sign",
+            Self::Verify => "Verify",
+            Self::Extract => "Extract",
+            Self::Inspect => "Inspect",
+        }
+    }
+
+    fn all() -> [Self; 5] {
+        [
+            Self::Pack,
+            Self::Sign,
+            Self::Verify,
+            Self::Extract,
+            Self::Inspect,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StatusKind {
+    Success,
+    Error,
+    Info,
+}
+
+#[derive(Clone, Debug)]
+struct StatusBanner {
+    kind: StatusKind,
+    message: String,
+}
+
+#[derive(Clone, Debug)]
+struct PackForm {
+    input_path: String,
+    output_path: String,
+    signature_algorithm: SignatureAlgorithm,
+    manifest_encoding: ManifestEncoding,
+    compression_mode: CompressionMode,
+    compression_layout: CompressionLayout,
+    recipient_keys: Vec<String>,
+}
+
+impl PackForm {
+    fn from_config(config: &RepoConfig) -> Self {
+        Self {
+            input_path: String::new(),
+            output_path: String::new(),
+            signature_algorithm: config.signature_algorithm,
+            manifest_encoding: config.manifest_encoding,
+            compression_mode: config.compression_mode,
+            compression_layout: config.compression_layout,
+            recipient_keys: vec![String::new()],
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SignForm {
+    archive_path: String,
+    key_path: String,
+    placement: SignaturePlacement,
+    detached_signature_path: String,
+}
+
+impl SignForm {
+    fn from_config(config: &RepoConfig) -> Self {
+        Self {
+            archive_path: String::new(),
+            key_path: String::new(),
+            placement: config.signature_placement,
+            detached_signature_path: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct VerifyForm {
+    archive_path: String,
+    public_key_path: String,
+    detached_signature_path: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ExtractForm {
+    archive_path: String,
+    output_dir: String,
+    public_key_path: String,
+    detached_signature_path: String,
+    recipient_key_path: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct InspectForm {
+    archive_path: String,
+}
+
+enum TaskMessage {
+    Pack(Result<String, String>),
+    Sign(Result<String, String>),
+    Verify(Result<VerifyReport, String>),
+    Extract(Result<String, String>),
+    Inspect(Result<InspectReport, String>),
+}
+
+struct QsrlDesktopApp {
+    root: PathBuf,
+    active_workflow: Workflow,
+    status: StatusBanner,
+    log: String,
+    pack_form: PackForm,
+    sign_form: SignForm,
+    verify_form: VerifyForm,
+    extract_form: ExtractForm,
+    inspect_form: InspectForm,
+    last_verify: Option<VerifyReport>,
+    last_inspect: Option<InspectReport>,
+    worker: Option<Receiver<TaskMessage>>,
+    pending_label: Option<&'static str>,
+}
+
+impl QsrlDesktopApp {
+    fn new(root: PathBuf) -> Self {
+        let (config, status) = match RepoConfig::load_or_default(&root) {
+            Ok(config) => (
+                config,
+                StatusBanner {
+                    kind: StatusKind::Info,
+                    message: "Local-only desktop demo for QSRL. All archive, signing, verification, extraction, and encryption work stays on disk.".into(),
+                },
+            ),
+            Err(error) => (
+                RepoConfig::default(),
+                StatusBanner {
+                    kind: StatusKind::Error,
+                    message: format!(
+                        "Could not load repo config from {}: {error}",
+                        RepoConfig::path(&root).display()
+                    ),
+                },
+            ),
+        };
+
+        let backend = if cfg!(feature = "liboqs-backend") {
+            "Crypto backend: liboqs-backend enabled"
+        } else {
+            "Crypto backend: stub signing mode; build with desktop-ui,liboqs-backend for real ML-DSA, SLH-DSA, and ML-KEM"
+        };
+
+        Self {
+            root: root.clone(),
+            active_workflow: Workflow::Pack,
+            status,
+            log: format!(
+                "QSRL Desktop ready\n{}\nworkspace: {}",
+                backend,
+                root.display()
+            ),
+            pack_form: PackForm::from_config(&config),
+            sign_form: SignForm::from_config(&config),
+            verify_form: VerifyForm::default(),
+            extract_form: ExtractForm::default(),
+            inspect_form: InspectForm::default(),
+            last_verify: None,
+            last_inspect: None,
+            worker: None,
+            pending_label: None,
+        }
+    }
+
+    fn is_busy(&self) -> bool {
+        self.worker.is_some()
+    }
+
+    fn start_pack(&mut self) {
+        let request = PackRequest {
+            root: self.root.clone(),
+            input_path: PathBuf::from(self.pack_form.input_path.trim()),
+            output_path: PathBuf::from(self.pack_form.output_path.trim()),
+            settings: SettingsOverrides {
+                signature_algorithm: Some(self.pack_form.signature_algorithm),
+                manifest_encoding: Some(self.pack_form.manifest_encoding),
+                compression_mode: Some(self.pack_form.compression_mode),
+                compression_layout: Some(self.pack_form.compression_layout),
+                ..SettingsOverrides::default()
+            },
+            recipient_key_paths: self
+                .pack_form
+                .recipient_keys
+                .iter()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+        };
+        if let Err(error) = validate_pack_request(&request) {
+            self.finish_error("Pack", error.to_string());
+            return;
+        }
+        self.last_inspect = None;
+        self.last_verify = None;
+        let (sender, receiver) = mpsc::channel();
+        self.worker = Some(receiver);
+        self.pending_label = Some("Pack");
+        self.status = StatusBanner {
+            kind: StatusKind::Info,
+            message: "Pack in progress...".into(),
+        };
+        thread::spawn(move || {
+            let result = run_pack(&request).map_err(|error| error.to_string());
+            let _ = sender.send(TaskMessage::Pack(result));
+        });
+    }
+
+    fn start_sign(&mut self) {
+        let request = SignRequest {
+            archive_path: PathBuf::from(self.sign_form.archive_path.trim()),
+            key_path: PathBuf::from(self.sign_form.key_path.trim()),
+            placement_override: Some(self.sign_form.placement),
+            signature_path: trimmed_optional_path(&self.sign_form.detached_signature_path),
+        };
+        if let Err(error) = validate_sign_request(&request) {
+            self.finish_error("Sign", error.to_string());
+            return;
+        }
+        self.last_verify = None;
+        let (sender, receiver) = mpsc::channel();
+        self.worker = Some(receiver);
+        self.pending_label = Some("Sign");
+        self.status = StatusBanner {
+            kind: StatusKind::Info,
+            message: "Sign in progress...".into(),
+        };
+        thread::spawn(move || {
+            let result = run_sign(&request).map_err(|error| error.to_string());
+            let _ = sender.send(TaskMessage::Sign(result));
+        });
+    }
+
+    fn start_verify(&mut self) {
+        let request = VerifyRequest {
+            archive_path: PathBuf::from(self.verify_form.archive_path.trim()),
+            public_key_path: PathBuf::from(self.verify_form.public_key_path.trim()),
+            signature_path: trimmed_optional_path(&self.verify_form.detached_signature_path),
+        };
+        if let Err(error) = validate_verify_request(&request) {
+            self.finish_error("Verify", error.to_string());
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.worker = Some(receiver);
+        self.pending_label = Some("Verify");
+        self.status = StatusBanner {
+            kind: StatusKind::Info,
+            message: "Verify in progress...".into(),
+        };
+        thread::spawn(move || {
+            let result = verify_report(&request).map_err(|error| error.to_string());
+            let _ = sender.send(TaskMessage::Verify(result));
+        });
+    }
+
+    fn start_extract(&mut self) {
+        let request = ExtractRequest {
+            archive_path: PathBuf::from(self.extract_form.archive_path.trim()),
+            output_dir: PathBuf::from(self.extract_form.output_dir.trim()),
+            public_key_path: trimmed_optional_path(&self.extract_form.public_key_path),
+            signature_path: trimmed_optional_path(&self.extract_form.detached_signature_path),
+            recipient_key_path: trimmed_optional_path(&self.extract_form.recipient_key_path),
+        };
+        if let Err(error) = validate_extract_request(&request) {
+            self.finish_error("Extract", error.to_string());
+            return;
+        }
+        self.last_inspect = None;
+        self.last_verify = None;
+        let (sender, receiver) = mpsc::channel();
+        self.worker = Some(receiver);
+        self.pending_label = Some("Extract");
+        self.status = StatusBanner {
+            kind: StatusKind::Info,
+            message: "Extract in progress...".into(),
+        };
+        thread::spawn(move || {
+            let result = run_extract(&request).map_err(|error| error.to_string());
+            let _ = sender.send(TaskMessage::Extract(result));
+        });
+    }
+
+    fn start_inspect(&mut self) {
+        let request = InspectRequest {
+            archive_path: PathBuf::from(self.inspect_form.archive_path.trim()),
+        };
+        if let Err(error) = validate_inspect_request(&request) {
+            self.finish_error("Inspect", error.to_string());
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.worker = Some(receiver);
+        self.pending_label = Some("Inspect");
+        self.status = StatusBanner {
+            kind: StatusKind::Info,
+            message: "Inspect in progress...".into(),
+        };
+        thread::spawn(move || {
+            let result = inspect_report(&request).map_err(|error| error.to_string());
+            let _ = sender.send(TaskMessage::Inspect(result));
+        });
+    }
+
+    fn poll_worker(&mut self, ctx: &egui::Context) {
+        if let Some(receiver) = &self.worker {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    self.worker = None;
+                    self.pending_label = None;
+                    match message {
+                        TaskMessage::Pack(result) => match result {
+                            Ok(log) => self.finish_success("Pack", log),
+                            Err(error) => self.finish_error("Pack", error),
+                        },
+                        TaskMessage::Sign(result) => match result {
+                            Ok(log) => self.finish_success("Sign", log),
+                            Err(error) => self.finish_error("Sign", error),
+                        },
+                        TaskMessage::Verify(result) => match result {
+                            Ok(report) => {
+                                self.log = report.log.clone();
+                                self.status = StatusBanner {
+                                    kind: StatusKind::Success,
+                                    message: format!(
+                                        "Verify succeeded for {}",
+                                        report.archive_path.display()
+                                    ),
+                                };
+                                self.last_verify = Some(report);
+                            }
+                            Err(error) => self.finish_error("Verify", error),
+                        },
+                        TaskMessage::Extract(result) => match result {
+                            Ok(log) => self.finish_success("Extract", log),
+                            Err(error) => self.finish_error("Extract", error),
+                        },
+                        TaskMessage::Inspect(result) => match result {
+                            Ok(report) => {
+                                self.log = report.log.clone();
+                                self.status = StatusBanner {
+                                    kind: StatusKind::Success,
+                                    message: format!(
+                                        "Inspect succeeded for {}",
+                                        report.archive_path.display()
+                                    ),
+                                };
+                                self.last_inspect = Some(report);
+                            }
+                            Err(error) => self.finish_error("Inspect", error),
+                        },
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.worker = None;
+                    self.pending_label = None;
+                    self.finish_error("Desktop task", "background worker disconnected".into());
+                }
+            }
+        }
+    }
+
+    fn finish_success(&mut self, label: &str, log: String) {
+        self.log = log;
+        self.status = StatusBanner {
+            kind: StatusKind::Success,
+            message: format!("{label} completed successfully."),
+        };
+    }
+
+    fn finish_error(&mut self, label: &str, error: String) {
+        self.log = format!("{label} failed\n{error}");
+        self.status = StatusBanner {
+            kind: StatusKind::Error,
+            message: format!("{label} failed: {error}"),
+        };
+    }
+
+    fn render_sidebar(&mut self, ctx: &egui::Context) {
+        #[allow(deprecated)]
+        egui::Panel::left("workflow-sidebar")
+            .resizable(false)
+            .min_size(170.0)
+            .show(ctx, |ui| {
+                ui.heading("QSRL Desktop");
+                ui.label("Local-only demo UI");
+                ui.separator();
+                for workflow in Workflow::all() {
+                    ui.selectable_value(&mut self.active_workflow, workflow, workflow.label());
+                }
+                ui.separator();
+                ui.label(RichText::new("Workspace").strong());
+                ui.monospace(self.root.display().to_string());
+                ui.add_space(8.0);
+                ui.label(RichText::new("Build mode").strong());
+                if cfg!(feature = "liboqs-backend") {
+                    ui.label("liboqs backend enabled");
+                } else {
+                    ui.label("stub signing backend");
+                }
+                if let Some(label) = self.pending_label {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(format!("{label} running...")).strong());
+                }
+            });
+    }
+
+    fn render_status(&self, ui: &mut egui::Ui) {
+        let color = match self.status.kind {
+            StatusKind::Success => Color32::from_rgb(38, 122, 72),
+            StatusKind::Error => Color32::from_rgb(142, 38, 38),
+            StatusKind::Info => Color32::from_rgb(40, 84, 130),
+        };
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.colored_label(color, RichText::new(&self.status.message).strong());
+        });
+    }
+
+    fn render_pack(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Pack");
+        ui.label("Package a folder into a .qsrl archive using the existing Rust archive logic.");
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(!self.is_busy(), |ui| {
+            path_row_directory(
+                ui,
+                &self.root,
+                "Input folder",
+                &mut self.pack_form.input_path,
+            );
+            path_row_save_archive(
+                ui,
+                &self.root,
+                "Output archive",
+                &mut self.pack_form.output_path,
+            );
+
+            enum_combo(
+                ui,
+                "Signature algorithm",
+                &mut self.pack_form.signature_algorithm,
+                &[
+                    (SignatureAlgorithm::MlDsa, "ml-dsa"),
+                    (SignatureAlgorithm::SlhDsa, "slh-dsa"),
+                ],
+            );
+            enum_combo(
+                ui,
+                "Manifest encoding",
+                &mut self.pack_form.manifest_encoding,
+                &[
+                    (ManifestEncoding::TextV1, "text-v1"),
+                    (ManifestEncoding::BinaryV1, "binary-v1"),
+                ],
+            );
+            enum_combo(
+                ui,
+                "Compression mode",
+                &mut self.pack_form.compression_mode,
+                &[
+                    (CompressionMode::None, "none"),
+                    (CompressionMode::Rle, "rle"),
+                ],
+            );
+            enum_combo(
+                ui,
+                "Compression layout",
+                &mut self.pack_form.compression_layout,
+                &[
+                    (CompressionLayout::PerFile, "per-file"),
+                    (CompressionLayout::WholeArchive, "whole-archive"),
+                ],
+            );
+
+            ui.add_space(8.0);
+            ui.label(RichText::new("Recipient public keys").strong());
+            ui.label("Leave blank for a signed-only archive.");
+            let mut remove_index = None;
+            let recipient_count = self.pack_form.recipient_keys.len();
+            for (index, path) in self.pack_form.recipient_keys.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Recipient {}", index + 1));
+                    ui.text_edit_singleline(path);
+                    if ui.button("Browse").clicked() {
+                        if let Some(selected) =
+                            pick_file(&self.root, path, Some(("Public keys", &["public"])))
+                        {
+                            *path = selected.display().to_string();
+                        }
+                    }
+                    if recipient_count > 1 && ui.button("Remove").clicked() {
+                        remove_index = Some(index);
+                    }
+                });
+            }
+            if let Some(index) = remove_index {
+                self.pack_form.recipient_keys.remove(index);
+            }
+            if ui.button("Add recipient").clicked() {
+                self.pack_form.recipient_keys.push(String::new());
+            }
+
+            ui.add_space(12.0);
+            if ui.button("Run pack").clicked() {
+                self.start_pack();
+            }
+        });
+    }
+
+    fn render_sign(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Sign");
+        ui.label("Attach an embedded signature or write a detached signature file.");
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(!self.is_busy(), |ui| {
+            path_row_file(
+                ui,
+                &self.root,
+                "Archive",
+                &mut self.sign_form.archive_path,
+                Some(("QSRL archives", &["qsrl"])),
+            );
+            path_row_file(
+                ui,
+                &self.root,
+                "Private key",
+                &mut self.sign_form.key_path,
+                Some(("Private keys", &["private"])),
+            );
+            enum_combo(
+                ui,
+                "Signature placement",
+                &mut self.sign_form.placement,
+                &[
+                    (SignaturePlacement::Embedded, "embedded"),
+                    (SignaturePlacement::Detached, "detached"),
+                ],
+            );
+            if self.sign_form.placement == SignaturePlacement::Detached {
+                path_row_save_signature(
+                    ui,
+                    &self.root,
+                    "Detached signature",
+                    &mut self.sign_form.detached_signature_path,
+                );
+            }
+            ui.add_space(12.0);
+            if ui.button("Run sign").clicked() {
+                self.start_sign();
+            }
+        });
+    }
+
+    fn render_verify(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Verify");
+        ui.label(
+            "Verify the archive signature and check file hashes when the payload is plaintext.",
+        );
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(!self.is_busy(), |ui| {
+            path_row_file(
+                ui,
+                &self.root,
+                "Archive",
+                &mut self.verify_form.archive_path,
+                Some(("QSRL archives", &["qsrl"])),
+            );
+            path_row_file(
+                ui,
+                &self.root,
+                "Public key",
+                &mut self.verify_form.public_key_path,
+                Some(("Public keys", &["public"])),
+            );
+            path_row_file(
+                ui,
+                &self.root,
+                "Detached signature (optional)",
+                &mut self.verify_form.detached_signature_path,
+                Some(("Signature files", &["sig"])),
+            );
+            ui.add_space(12.0);
+            if ui.button("Run verify").clicked() {
+                self.start_verify();
+            }
+        });
+
+        if let Some(report) = &self.last_verify {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.label(RichText::new("Verification summary").strong());
+            metadata_row(ui, "Archive", &report.archive_path.display().to_string());
+            metadata_row(ui, "Signature", &report.signature_status);
+            metadata_row(ui, "File hashes", &report.file_hash_status);
+            metadata_row(ui, "Files checked", &report.files_checked.to_string());
+            metadata_row(ui, "Placement", report.placement.as_str());
+            metadata_row(ui, "Algorithm", report.algorithm.as_str());
+        }
+    }
+
+    fn render_extract(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Extract");
+        ui.label(
+            "Extract files safely into an output directory and verify integrity before writing.",
+        );
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(!self.is_busy(), |ui| {
+            path_row_file(
+                ui,
+                &self.root,
+                "Archive",
+                &mut self.extract_form.archive_path,
+                Some(("QSRL archives", &["qsrl"])),
+            );
+            path_row_directory(
+                ui,
+                &self.root,
+                "Output directory",
+                &mut self.extract_form.output_dir,
+            );
+            path_row_file(
+                ui,
+                &self.root,
+                "Public key (optional)",
+                &mut self.extract_form.public_key_path,
+                Some(("Public keys", &["public"])),
+            );
+            path_row_file(
+                ui,
+                &self.root,
+                "Detached signature (optional)",
+                &mut self.extract_form.detached_signature_path,
+                Some(("Signature files", &["sig"])),
+            );
+            path_row_file(
+                ui,
+                &self.root,
+                "Recipient private key (optional)",
+                &mut self.extract_form.recipient_key_path,
+                Some(("Private keys", &["private"])),
+            );
+            ui.add_space(12.0);
+            if ui.button("Run extract").clicked() {
+                self.start_extract();
+            }
+        });
+    }
+
+    fn render_inspect(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Inspect");
+        ui.label("Read archive metadata directly from the existing QSRL parser.");
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(!self.is_busy(), |ui| {
+            path_row_file(
+                ui,
+                &self.root,
+                "Archive",
+                &mut self.inspect_form.archive_path,
+                Some(("QSRL archives", &["qsrl"])),
+            );
+            ui.add_space(12.0);
+            if ui.button("Run inspect").clicked() {
+                self.start_inspect();
+            }
+        });
+
+        if let Some(report) = &self.last_inspect {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.label(RichText::new("Archive metadata").strong());
+            metadata_row(ui, "Format version", &report.format_version.to_string());
+            metadata_row(
+                ui,
+                "Signature algorithm",
+                report.signature_algorithm.as_str(),
+            );
+            metadata_row(
+                ui,
+                "Signature placement",
+                report.signature_placement.as_str(),
+            );
+            metadata_row(ui, "Signature scope", &report.signature_scope);
+            metadata_row(ui, "Manifest encoding", report.manifest_encoding.as_str());
+            metadata_row(
+                ui,
+                "Compression",
+                &format!(
+                    "{} / {}",
+                    report.compression_mode.as_str(),
+                    report.compression_layout.as_str()
+                ),
+            );
+            metadata_row(ui, "Encrypted", if report.encrypted { "yes" } else { "no" });
+            metadata_row(ui, "Recipient count", &report.recipient_count.to_string());
+            metadata_row(
+                ui,
+                "KEM method",
+                report.kem_method.as_deref().unwrap_or("n/a"),
+            );
+            metadata_row(
+                ui,
+                "AEAD method",
+                report.aead_method.as_deref().unwrap_or("n/a"),
+            );
+            metadata_row(ui, "Signature status", &report.signature_status);
+
+            ui.add_space(8.0);
+            ui.label(RichText::new("Files").strong());
+            ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                for file in &report.files {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        metadata_row(ui, "Path", &file.path);
+                        metadata_row(ui, "Size", &format!("{} bytes", file.size));
+                        metadata_row(ui, "SHA-256", &file.sha256_hex);
+                        metadata_row(ui, "Compression", file.compression.as_str());
+                    });
+                    ui.add_space(6.0);
+                }
+            });
+        }
+    }
+}
+
+impl eframe::App for QsrlDesktopApp {
+    #[allow(deprecated)]
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.poll_worker(&ctx);
+        self.render_sidebar(&ctx);
+
+        egui::Panel::bottom("output-log")
+            .resizable(true)
+            .min_size(180.0)
+            .default_size(240.0)
+            .show(&ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Output log").strong());
+                    if ui.button("Clear").clicked() && !self.is_busy() {
+                        self.log.clear();
+                    }
+                });
+                ui.add(
+                    TextEdit::multiline(&mut self.log)
+                        .desired_rows(12)
+                        .code_editor()
+                        .interactive(false),
+                );
+            });
+
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            self.render_status(ui);
+            ui.add_space(10.0);
+            match self.active_workflow {
+                Workflow::Pack => self.render_pack(ui),
+                Workflow::Sign => self.render_sign(ui),
+                Workflow::Verify => self.render_verify(ui),
+                Workflow::Extract => self.render_extract(ui),
+                Workflow::Inspect => self.render_inspect(ui),
+            }
+        });
+    }
+}
+
+fn metadata_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [160.0, 20.0],
+            egui::Label::new(RichText::new(label).strong()),
+        );
+        ui.label(value);
+    });
+}
+
+fn enum_combo<T>(ui: &mut egui::Ui, label: &str, value: &mut T, options: &[(T, &str)])
+where
+    T: Copy + PartialEq,
+{
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [160.0, 20.0],
+            egui::Label::new(RichText::new(label).strong()),
+        );
+        egui::ComboBox::from_id_salt(label)
+            .selected_text(
+                options
+                    .iter()
+                    .find_map(|(option, text)| (*option == *value).then_some(*text))
+                    .unwrap_or("select"),
+            )
+            .show_ui(ui, |ui| {
+                for (option, text) in options {
+                    ui.selectable_value(value, *option, *text);
+                }
+            });
+    });
+}
+
+fn path_row_directory(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [160.0, 20.0],
+            egui::Label::new(RichText::new(label).strong()),
+        );
+        ui.text_edit_singleline(value);
+        if ui.button("Browse").clicked() {
+            if let Some(selected) = pick_folder(root, value) {
+                *value = selected.display().to_string();
+            }
+        }
+    });
+}
+
+fn path_row_file(
+    ui: &mut egui::Ui,
+    root: &Path,
+    label: &str,
+    value: &mut String,
+    filter: Option<(&str, &[&str])>,
+) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [160.0, 20.0],
+            egui::Label::new(RichText::new(label).strong()),
+        );
+        ui.text_edit_singleline(value);
+        if ui.button("Browse").clicked() {
+            if let Some(selected) = pick_file(root, value, filter) {
+                *value = selected.display().to_string();
+            }
+        }
+    });
+}
+
+fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [160.0, 20.0],
+            egui::Label::new(RichText::new(label).strong()),
+        );
+        ui.text_edit_singleline(value);
+        if ui.button("Browse").clicked() {
+            if let Some(selected) = save_file(
+                root,
+                value,
+                "archive.qsrl",
+                Some(("QSRL archives", &["qsrl"])),
+            ) {
+                *value = ensure_extension(selected, "qsrl").display().to_string();
+            }
+        }
+    });
+}
+
+fn path_row_save_signature(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [160.0, 20.0],
+            egui::Label::new(RichText::new(label).strong()),
+        );
+        ui.text_edit_singleline(value);
+        if ui.button("Browse").clicked() {
+            if let Some(selected) = save_file(
+                root,
+                value,
+                "archive.qsrl.sig",
+                Some(("Signature files", &["sig"])),
+            ) {
+                *value = ensure_extension(selected, "sig").display().to_string();
+            }
+        }
+    });
+}
+
+fn pick_folder(root: &Path, current: &str) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(start_dir) = dialog_start_dir(root, current) {
+        dialog = dialog.set_directory(start_dir);
+    }
+    dialog.pick_folder()
+}
+
+fn pick_file(root: &Path, current: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(start_dir) = dialog_start_dir(root, current) {
+        dialog = dialog.set_directory(start_dir);
+    }
+    if let Some((label, extensions)) = filter {
+        dialog = dialog.add_filter(label, extensions);
+    }
+    dialog.pick_file()
+}
+
+fn save_file(
+    root: &Path,
+    current: &str,
+    default_name: &str,
+    filter: Option<(&str, &[&str])>,
+) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(start_dir) = dialog_start_dir(root, current) {
+        dialog = dialog.set_directory(start_dir);
+    }
+    dialog = dialog.set_file_name(default_name);
+    if let Some((label, extensions)) = filter {
+        dialog = dialog.add_filter(label, extensions);
+    }
+    dialog.save_file()
+}
+
+fn dialog_start_dir(root: &Path, current: &str) -> Option<PathBuf> {
+    let trimmed = current.trim();
+    if trimmed.is_empty() {
+        return Some(root.to_path_buf());
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .or_else(|| Some(root.to_path_buf()))
+    }
+}
+
+fn trimmed_optional_path(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn ensure_extension(mut path: PathBuf, extension: &str) -> PathBuf {
+    if path.extension().and_then(|value| value.to_str()) != Some(extension) {
+        path.set_extension(extension);
+    }
+    path
+}
