@@ -497,7 +497,6 @@ impl QsrlDesktopApp {
             .min_size(170.0)
             .show(ctx, |ui| {
                 ui.heading("QSRL Desktop");
-                ui.label("Local-only demo UI");
                 ui.separator();
                 for workflow in Workflow::all() {
                     ui.selectable_value(&mut self.active_workflow, workflow, workflow.label());
