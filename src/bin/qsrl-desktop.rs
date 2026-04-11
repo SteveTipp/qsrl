@@ -1,5 +1,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -12,9 +13,9 @@ use qsrl::protocol::{
 };
 use qsrl::ui_bridge::{
     ExtractRequest, InspectReport, InspectRequest, PackRequest, SignRequest, VerifyReport,
-    VerifyRequest, inspect_report, run_extract, run_pack, run_sign, validate_extract_request,
-    validate_inspect_request, validate_pack_request, validate_sign_request,
-    validate_verify_request, verify_report,
+    VerifyRequest, inspect_report, pack_input_file_count, run_extract, run_pack, run_sign,
+    validate_extract_request, validate_inspect_request, validate_pack_request,
+    validate_sign_request, validate_verify_request, verify_report,
 };
 
 fn main() -> eframe::Result<()> {
@@ -70,12 +71,36 @@ enum StatusKind {
     Success,
     Error,
     Info,
+    Warning,
 }
 
 #[derive(Clone, Debug)]
 struct StatusBanner {
     kind: StatusKind,
-    message: String,
+    title: String,
+    detail_lines: Vec<String>,
+    action: Option<StatusAction>,
+}
+
+impl StatusBanner {
+    fn empty() -> Self {
+        Self {
+            kind: StatusKind::Info,
+            title: String::new(),
+            detail_lines: Vec::new(),
+            action: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.title.is_empty() && self.detail_lines.is_empty() && self.action.is_none()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StatusAction {
+    label: &'static str,
+    path: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +188,7 @@ struct QsrlDesktopApp {
     inspect_form: InspectForm,
     last_verify: Option<VerifyReport>,
     last_inspect: Option<InspectReport>,
+    pending_empty_pack_request: Option<PackRequest>,
     worker: Option<Receiver<TaskMessage>>,
     pending_label: Option<&'static str>,
 }
@@ -170,21 +196,14 @@ struct QsrlDesktopApp {
 impl QsrlDesktopApp {
     fn new(root: PathBuf) -> Self {
         let (config, status) = match RepoConfig::load_or_default(&root) {
-            Ok(config) => (
-                config,
-                StatusBanner {
-                    kind: StatusKind::Info,
-                    message: "Local-only desktop demo for QSRL. All archive, signing, verification, extraction, and encryption work stays on disk.".into(),
-                },
-            ),
+            Ok(config) => (config, StatusBanner::empty()),
             Err(error) => (
                 RepoConfig::default(),
                 StatusBanner {
                     kind: StatusKind::Error,
-                    message: format!(
-                        "Could not load repo config from {}: {error}",
-                        RepoConfig::path(&root).display()
-                    ),
+                    title: "Could not load repo config".into(),
+                    detail_lines: vec![format!("{}\n{error}", RepoConfig::path(&root).display())],
+                    action: None,
                 },
             ),
         };
@@ -211,6 +230,7 @@ impl QsrlDesktopApp {
             inspect_form: InspectForm::default(),
             last_verify: None,
             last_inspect: None,
+            pending_empty_pack_request: None,
             worker: None,
             pending_label: None,
         }
@@ -245,15 +265,37 @@ impl QsrlDesktopApp {
             self.finish_error("Pack", error.to_string());
             return;
         }
+        match pack_input_file_count(&request.input_path) {
+            Ok(0) => {
+                self.pending_empty_pack_request = Some(request.clone());
+                self.status = StatusBanner {
+                    kind: StatusKind::Warning,
+                    title: "Selected folder is empty".into(),
+                    detail_lines: vec![
+                        "Packing now will create an empty .qsrl archive.".into(),
+                        request.input_path.display().to_string(),
+                    ],
+                    action: None,
+                };
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.finish_error("Pack", error.to_string());
+                return;
+            }
+        }
+        self.pending_empty_pack_request = None;
+        self.launch_pack_task(request);
+    }
+
+    fn launch_pack_task(&mut self, request: PackRequest) {
         self.last_inspect = None;
         self.last_verify = None;
         let (sender, receiver) = mpsc::channel();
         self.worker = Some(receiver);
         self.pending_label = Some("Pack");
-        self.status = StatusBanner {
-            kind: StatusKind::Info,
-            message: "Pack in progress...".into(),
-        };
+        self.status = info_banner("Pack in progress...", &[]);
         thread::spawn(move || {
             let result = run_pack(&request).map_err(|error| error.to_string());
             let _ = sender.send(TaskMessage::Pack(result));
@@ -275,10 +317,7 @@ impl QsrlDesktopApp {
         let (sender, receiver) = mpsc::channel();
         self.worker = Some(receiver);
         self.pending_label = Some("Sign");
-        self.status = StatusBanner {
-            kind: StatusKind::Info,
-            message: "Sign in progress...".into(),
-        };
+        self.status = info_banner("Sign in progress...", &[]);
         thread::spawn(move || {
             let result = run_sign(&request).map_err(|error| error.to_string());
             let _ = sender.send(TaskMessage::Sign(result));
@@ -298,10 +337,7 @@ impl QsrlDesktopApp {
         let (sender, receiver) = mpsc::channel();
         self.worker = Some(receiver);
         self.pending_label = Some("Verify");
-        self.status = StatusBanner {
-            kind: StatusKind::Info,
-            message: "Verify in progress...".into(),
-        };
+        self.status = info_banner("Verify in progress...", &[]);
         thread::spawn(move || {
             let result = verify_report(&request).map_err(|error| error.to_string());
             let _ = sender.send(TaskMessage::Verify(result));
@@ -325,10 +361,7 @@ impl QsrlDesktopApp {
         let (sender, receiver) = mpsc::channel();
         self.worker = Some(receiver);
         self.pending_label = Some("Extract");
-        self.status = StatusBanner {
-            kind: StatusKind::Info,
-            message: "Extract in progress...".into(),
-        };
+        self.status = info_banner("Extract in progress...", &[]);
         thread::spawn(move || {
             let result = run_extract(&request).map_err(|error| error.to_string());
             let _ = sender.send(TaskMessage::Extract(result));
@@ -346,10 +379,7 @@ impl QsrlDesktopApp {
         let (sender, receiver) = mpsc::channel();
         self.worker = Some(receiver);
         self.pending_label = Some("Inspect");
-        self.status = StatusBanner {
-            kind: StatusKind::Info,
-            message: "Inspect in progress...".into(),
-        };
+        self.status = info_banner("Inspect in progress...", &[]);
         thread::spawn(move || {
             let result = inspect_report(&request).map_err(|error| error.to_string());
             let _ = sender.send(TaskMessage::Inspect(result));
@@ -376,10 +406,14 @@ impl QsrlDesktopApp {
                                 self.log = report.log.clone();
                                 self.status = StatusBanner {
                                     kind: StatusKind::Success,
-                                    message: format!(
-                                        "Verify succeeded for {}",
-                                        report.archive_path.display()
-                                    ),
+                                    title: "Verify completed successfully".into(),
+                                    detail_lines: vec![
+                                        format!("Archive: {}", report.archive_path.display()),
+                                        format!("Signature: {}", report.signature_status),
+                                        format!("File hashes: {}", report.file_hash_status),
+                                        format!("Files checked: {}", report.files_checked),
+                                    ],
+                                    action: None,
                                 };
                                 self.last_verify = Some(report);
                             }
@@ -394,10 +428,21 @@ impl QsrlDesktopApp {
                                 self.log = report.log.clone();
                                 self.status = StatusBanner {
                                     kind: StatusKind::Success,
-                                    message: format!(
-                                        "Inspect succeeded for {}",
-                                        report.archive_path.display()
-                                    ),
+                                    title: "Inspect completed successfully".into(),
+                                    detail_lines: vec![
+                                        format!("Archive: {}", report.archive_path.display()),
+                                        format!("Files: {}", report.files.len()),
+                                        format!(
+                                            "Signature: {} / {}",
+                                            report.signature_algorithm.as_str(),
+                                            report.signature_placement.as_str()
+                                        ),
+                                        format!(
+                                            "Encryption: {}",
+                                            if report.encrypted { "enabled" } else { "none" }
+                                        ),
+                                    ],
+                                    action: None,
                                 };
                                 self.last_inspect = Some(report);
                             }
@@ -419,9 +464,19 @@ impl QsrlDesktopApp {
 
     fn finish_success(&mut self, label: &str, log: String) {
         self.log = log;
+        let action = if label == "Extract" {
+            trimmed_optional_path(&self.extract_form.output_dir).map(|path| StatusAction {
+                label: "Open output folder",
+                path,
+            })
+        } else {
+            None
+        };
         self.status = StatusBanner {
             kind: StatusKind::Success,
-            message: format!("{label} completed successfully."),
+            title: format!("{label} completed successfully"),
+            detail_lines: summary_lines(&self.log, 4),
+            action,
         };
     }
 
@@ -429,7 +484,9 @@ impl QsrlDesktopApp {
         self.log = format!("{label} failed\n{error}");
         self.status = StatusBanner {
             kind: StatusKind::Error,
-            message: format!("{label} failed: {error}"),
+            title: format!("{label} failed"),
+            detail_lines: summary_lines(&self.log, 5),
+            action: None,
         };
     }
 
@@ -447,7 +504,7 @@ impl QsrlDesktopApp {
                 }
                 ui.separator();
                 ui.label(RichText::new("Workspace").strong());
-                ui.monospace(self.root.display().to_string());
+                hover_copy_value(ui, &self.root.display().to_string(), true);
                 ui.add_space(8.0);
                 ui.label(RichText::new("Build mode").strong());
                 if cfg!(feature = "liboqs-backend") {
@@ -463,13 +520,30 @@ impl QsrlDesktopApp {
     }
 
     fn render_status(&self, ui: &mut egui::Ui) {
+        if self.status.is_empty() {
+            return;
+        }
         let color = match self.status.kind {
             StatusKind::Success => Color32::from_rgb(38, 122, 72),
             StatusKind::Error => Color32::from_rgb(142, 38, 38),
             StatusKind::Info => Color32::from_rgb(40, 84, 130),
+            StatusKind::Warning => Color32::from_rgb(150, 103, 25),
         };
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.colored_label(color, RichText::new(&self.status.message).strong());
+            ui.colored_label(color, RichText::new(&self.status.title).strong());
+            for line in &self.status.detail_lines {
+                ui.label(line);
+            }
+            if let Some(action) = &self.status.action {
+                ui.add_space(6.0);
+                if ui.button(action.label).clicked() {
+                    if let Err(error) = open_in_file_manager(&action.path) {
+                        ui.ctx().copy_text(action.path.display().to_string());
+                        ui.label(format!("Could not open folder: {error}"));
+                    }
+                }
+                ui.label(RichText::new(action.path.display().to_string()).small());
+            }
         });
     }
 
@@ -561,6 +635,29 @@ impl QsrlDesktopApp {
             if ui.button("Run pack").clicked() {
                 self.start_pack();
             }
+            if let Some(request) = self.pending_empty_pack_request.clone() {
+                ui.add_space(10.0);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(150, 103, 25),
+                        RichText::new("Empty archive warning").strong(),
+                    );
+                    ui.label(format!(
+                        "No files were found under {}.",
+                        request.input_path.display()
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Pack empty archive anyway").clicked() {
+                            self.pending_empty_pack_request = None;
+                            self.launch_pack_task(request.clone());
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.pending_empty_pack_request = None;
+                            self.status = StatusBanner::empty();
+                        }
+                    });
+                });
+            }
         });
     }
 
@@ -647,7 +744,7 @@ impl QsrlDesktopApp {
             ui.add_space(12.0);
             ui.separator();
             ui.label(RichText::new("Verification summary").strong());
-            metadata_row(ui, "Archive", &report.archive_path.display().to_string());
+            metadata_path_row(ui, "Archive", &report.archive_path);
             metadata_row(ui, "Signature", &report.signature_status);
             metadata_row(ui, "File hashes", &report.file_hash_status);
             metadata_row(ui, "Files checked", &report.files_checked.to_string());
@@ -703,6 +800,22 @@ impl QsrlDesktopApp {
                 self.start_extract();
             }
         });
+
+        if matches!(self.status.kind, StatusKind::Success)
+            && self
+                .status
+                .action
+                .as_ref()
+                .map(|action| action.label == "Open output folder")
+                .unwrap_or(false)
+        {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.label(RichText::new("Extraction summary").strong());
+            if let Some(action) = &self.status.action {
+                metadata_path_row(ui, "Output folder", &action.path);
+            }
+        }
     }
 
     fn render_inspect(&mut self, ui: &mut egui::Ui) {
@@ -827,7 +940,17 @@ fn metadata_row(ui: &mut egui::Ui, label: &str, value: &str) {
             [160.0, 20.0],
             egui::Label::new(RichText::new(label).strong()),
         );
-        ui.label(value);
+        hover_copy_value(ui, value, false);
+    });
+}
+
+fn metadata_path_row(ui: &mut egui::Ui, label: &str, path: &Path) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [160.0, 20.0],
+            egui::Label::new(RichText::new(label).strong()),
+        );
+        hover_copy_value(ui, &path.display().to_string(), true);
     });
 }
 
@@ -861,12 +984,16 @@ fn path_row_directory(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut S
             [160.0, 20.0],
             egui::Label::new(RichText::new(label).strong()),
         );
-        ui.text_edit_singleline(value);
+        let response = ui.text_edit_singleline(value);
+        if !value.trim().is_empty() {
+            response.on_hover_text(value.clone());
+        }
         if ui.button("Browse").clicked() {
             if let Some(selected) = pick_folder(root, value) {
                 *value = selected.display().to_string();
             }
         }
+        copy_path_button(ui, value);
     });
 }
 
@@ -882,12 +1009,16 @@ fn path_row_file(
             [160.0, 20.0],
             egui::Label::new(RichText::new(label).strong()),
         );
-        ui.text_edit_singleline(value);
+        let response = ui.text_edit_singleline(value);
+        if !value.trim().is_empty() {
+            response.on_hover_text(value.clone());
+        }
         if ui.button("Browse").clicked() {
             if let Some(selected) = pick_file(root, value, filter) {
                 *value = selected.display().to_string();
             }
         }
+        copy_path_button(ui, value);
     });
 }
 
@@ -897,7 +1028,10 @@ fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mu
             [160.0, 20.0],
             egui::Label::new(RichText::new(label).strong()),
         );
-        ui.text_edit_singleline(value);
+        let response = ui.text_edit_singleline(value);
+        if !value.trim().is_empty() {
+            response.on_hover_text(value.clone());
+        }
         if ui.button("Browse").clicked() {
             if let Some(selected) = save_file(
                 root,
@@ -908,6 +1042,7 @@ fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mu
                 *value = ensure_extension(selected, "qsrl").display().to_string();
             }
         }
+        copy_path_button(ui, value);
     });
 }
 
@@ -917,7 +1052,10 @@ fn path_row_save_signature(ui: &mut egui::Ui, root: &Path, label: &str, value: &
             [160.0, 20.0],
             egui::Label::new(RichText::new(label).strong()),
         );
-        ui.text_edit_singleline(value);
+        let response = ui.text_edit_singleline(value);
+        if !value.trim().is_empty() {
+            response.on_hover_text(value.clone());
+        }
         if ui.button("Browse").clicked() {
             if let Some(selected) = save_file(
                 root,
@@ -928,6 +1066,7 @@ fn path_row_save_signature(ui: &mut egui::Ui, root: &Path, label: &str, value: &
                 *value = ensure_extension(selected, "sig").display().to_string();
             }
         }
+        copy_path_button(ui, value);
     });
 }
 
@@ -996,4 +1135,94 @@ fn ensure_extension(mut path: PathBuf, extension: &str) -> PathBuf {
         path.set_extension(extension);
     }
     path
+}
+
+fn info_banner(title: &str, details: &[&str]) -> StatusBanner {
+    StatusBanner {
+        kind: StatusKind::Info,
+        title: title.into(),
+        detail_lines: details.iter().map(|value| value.to_string()).collect(),
+        action: None,
+    }
+}
+
+fn summary_lines(log: &str, max_lines: usize) -> Vec<String> {
+    log.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(max_lines)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn copy_path_button(ui: &mut egui::Ui, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if ui.small_button("Copy").on_hover_text("Copy path").clicked() {
+        ui.ctx().copy_text(trimmed.to_string());
+    }
+}
+
+fn hover_copy_value(ui: &mut egui::Ui, value: &str, monospace: bool) {
+    let shortened = shorten_middle(value, 72);
+    let text = if monospace {
+        RichText::new(shortened.clone()).monospace()
+    } else {
+        RichText::new(shortened.clone())
+    };
+    let response = ui.label(text).on_hover_text(value.to_string());
+    if response.double_clicked() {
+        ui.ctx().copy_text(value.to_string());
+    }
+    if ui
+        .small_button("Copy")
+        .on_hover_text("Copy full value")
+        .clicked()
+    {
+        ui.ctx().copy_text(value.to_string());
+    }
+}
+
+fn shorten_middle(value: &str, max_chars: usize) -> String {
+    let total = value.chars().count();
+    if total <= max_chars {
+        return value.to_string();
+    }
+    let keep_each_side = max_chars.saturating_sub(3) / 2;
+    let start: String = value.chars().take(keep_each_side).collect();
+    let end: String = value
+        .chars()
+        .rev()
+        .take(keep_each_side)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{start}...{end}")
+}
+
+fn open_in_file_manager(path: &Path) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("explorer");
+        command.arg(path);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    let status = command
+        .status()
+        .map_err(|error| format!("launching system file manager: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("system file manager exited with status {status}"))
+    }
 }

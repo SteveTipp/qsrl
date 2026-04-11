@@ -9,7 +9,7 @@ use crate::error::{QsrlError, Result};
 use crate::protocol::{
     CompressionLayout, CompressionMode, ManifestEncoding, SignatureAlgorithm, SignaturePlacement,
 };
-use crate::util::hex_encode;
+use crate::util::{collect_input_files, hex_encode};
 
 #[derive(Clone, Debug)]
 pub struct PackRequest {
@@ -148,6 +148,10 @@ pub fn run_pack(request: &PackRequest) -> Result<String> {
         request.settings.clone(),
         &request.recipient_key_paths,
     )
+}
+
+pub fn pack_input_file_count(input_path: &Path) -> Result<usize> {
+    Ok(collect_input_files(input_path)?.len())
 }
 
 pub fn run_sign(request: &SignRequest) -> Result<String> {
@@ -386,6 +390,17 @@ mod tests {
         assert_eq!(report.files.len(), 1);
         assert!(!report.encrypted);
         assert_eq!(report.files[0].path, "hello.txt");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pack_input_file_count_reports_zero_for_empty_directory() {
+        let root = temp_root("empty-input");
+        fs::create_dir_all(&root).expect("create directory");
+
+        let count = pack_input_file_count(&root).expect("count input files");
+        assert_eq!(count, 0);
 
         let _ = fs::remove_dir_all(root);
     }
