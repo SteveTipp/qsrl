@@ -32,8 +32,64 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "QSRL Desktop",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(QsrlDesktopApp::new(root.clone())))),
+        Box::new(move |cc| {
+            apply_qwork_theme(&cc.egui_ctx);
+            Ok(Box::new(QsrlDesktopApp::new(root.clone())))
+        }),
     )
+}
+
+const QWORK_BLACK: Color32 = Color32::from_rgb(0, 0, 0);
+const QWORK_PANEL: Color32 = Color32::from_rgb(6, 8, 6);
+const QWORK_GREEN: Color32 = Color32::from_rgb(0, 255, 0);
+const QWORK_GREEN_DIM: Color32 = Color32::from_rgb(0, 96, 0);
+const QWORK_GREEN_DARK: Color32 = Color32::from_rgb(0, 24, 0);
+const QWORK_WHITE: Color32 = Color32::from_rgb(245, 245, 245);
+const QWORK_BLUE: Color32 = Color32::from_rgb(48, 128, 255);
+const QWORK_ERROR: Color32 = Color32::from_rgb(255, 88, 88);
+
+fn apply_qwork_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.global_style()).clone();
+    style.visuals = egui::Visuals::dark();
+    let visuals = &mut style.visuals;
+
+    visuals.override_text_color = Some(QWORK_WHITE);
+    visuals.weak_text_color = Some(Color32::from_rgb(176, 176, 176));
+    visuals.panel_fill = QWORK_BLACK;
+    visuals.window_fill = QWORK_PANEL;
+    visuals.window_stroke = egui::Stroke::new(1.0, QWORK_GREEN_DIM);
+    visuals.faint_bg_color = QWORK_GREEN_DARK;
+    visuals.extreme_bg_color = QWORK_BLACK;
+    visuals.text_edit_bg_color = Some(QWORK_BLACK);
+    visuals.code_bg_color = Color32::from_rgb(0, 14, 0);
+    visuals.hyperlink_color = QWORK_BLUE;
+    visuals.warn_fg_color = QWORK_GREEN;
+    visuals.error_fg_color = QWORK_ERROR;
+    visuals.selection.bg_fill = QWORK_GREEN_DARK;
+    visuals.selection.stroke = egui::Stroke::new(1.0, QWORK_GREEN);
+
+    visuals.widgets.noninteractive.bg_fill = QWORK_PANEL;
+    visuals.widgets.noninteractive.weak_bg_fill = QWORK_BLACK;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, QWORK_GREEN_DIM);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, QWORK_WHITE);
+
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(0, 12, 0);
+    visuals.widgets.inactive.weak_bg_fill = QWORK_GREEN_DARK;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, QWORK_GREEN_DIM);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, QWORK_WHITE);
+
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(0, 36, 0);
+    visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0, 48, 0);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, QWORK_GREEN);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, QWORK_GREEN);
+
+    visuals.widgets.active.bg_fill = Color32::from_rgb(0, 56, 0);
+    visuals.widgets.active.weak_bg_fill = Color32::from_rgb(0, 72, 0);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, QWORK_GREEN);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, QWORK_GREEN);
+    visuals.widgets.open = visuals.widgets.hovered;
+
+    ctx.set_global_style(style);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -596,10 +652,10 @@ impl QsrlDesktopApp {
             return;
         }
         let color = match self.status.kind {
-            StatusKind::Success => Color32::from_rgb(38, 122, 72),
-            StatusKind::Error => Color32::from_rgb(142, 38, 38),
-            StatusKind::Info => Color32::from_rgb(40, 84, 130),
-            StatusKind::Warning => Color32::from_rgb(150, 103, 25),
+            StatusKind::Success => QWORK_GREEN,
+            StatusKind::Error => QWORK_ERROR,
+            StatusKind::Info => QWORK_BLUE,
+            StatusKind::Warning => QWORK_GREEN,
         };
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.colored_label(color, RichText::new(&self.status.title).strong());
@@ -710,10 +766,7 @@ impl QsrlDesktopApp {
             if let Some(request) = self.pending_empty_pack_request.clone() {
                 ui.add_space(10.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.colored_label(
-                        Color32::from_rgb(150, 103, 25),
-                        RichText::new("Empty archive warning").strong(),
-                    );
+                    ui.colored_label(QWORK_GREEN, RichText::new("Empty archive warning").strong());
                     ui.label(format!(
                         "No files were found under {}.",
                         request.input_path.display()
