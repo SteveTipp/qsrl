@@ -25,7 +25,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("QSRL Desktop")
             .with_inner_size([1180.0, 820.0])
-            .with_min_inner_size([980.0, 680.0]),
+            .with_min_inner_size([980.0, 680.0])
+            .with_icon(qsrl_desktop_icon()),
         ..Default::default()
     };
 
@@ -37,6 +38,11 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(QsrlDesktopApp::new(root.clone())))
         }),
     )
+}
+
+fn qsrl_desktop_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../QSRL_Icon.png"))
+        .expect("bundled QSRL_Icon.png must be a valid PNG")
 }
 
 const QWORK_BLACK: Color32 = Color32::from_rgb(0, 0, 0);
