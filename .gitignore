@@ -1,7 +1,33 @@
-/target
-/.qsrl
-/keys
+# Rust build output
+/target/
+
+# QSRL local experiment state and generated artifacts
+/.qsrl/
+/keys/
+keys/
+*.private
+*.public
 *.qsrl
+*.qsrl.sig
 *.sig
-/comparison-output
-/.DS_Store
+/comparison-output/
+comparison-output/
+unpacked*/
+examples/unpacked*/
+
+# Temporary local run outputs
+tmp/
+temp/
+.tmp/
+run-output/
+local-output/
+*.tmp
+*.bak
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

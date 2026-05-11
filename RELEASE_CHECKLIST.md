@@ -1,0 +1,21 @@
+# Release Checklist
+
+Use this local checklist before making Quantum Sealed Record Layer (QSRL)
+public.
+
+- Run `cargo test`.
+- Run `cargo test --features liboqs-backend`.
+- Run `cargo check --features desktop-ui --bin qsrl-desktop`.
+- Run `cargo check --features desktop-ui,liboqs-backend --bin qsrl-desktop`.
+- Launch the desktop UI locally and smoke-test pack, sign, verify, extract, and
+  inspect.
+- Verify no generated keys, private keys, private archives, detached
+  signatures, or extracted payloads are tracked.
+- Verify `.gitignore` protects generated artifacts such as `keys/`, `*.private`,
+  `*.public`, `*.qsrl`, `*.qsrl.sig`, `comparison-output/`, and `unpacked*/`.
+- Verify `README.md` clearly says QSRL is experimental and not audited.
+- Verify `LICENSE` is present.
+- Verify screenshots, if later added, do not leak private paths, names, keys, or
+  archive contents.
+- Verify no `.dmg` or other release package has been added unless a packaging
+  pass was intentionally performed.

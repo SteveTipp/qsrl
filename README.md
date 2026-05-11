@@ -6,14 +6,15 @@ The `qsrl` CLI packages files into `.qsrl` archives, builds a canonical
 manifest, signs that manifest using a selectable post-quantum algorithm
 identifier, and can encrypt archive payloads for one or more ML-KEM recipients.
 
-This repository is for experimentation, not production cryptography.
+This repository is for experimentation, not production cryptography. QSRL has
+not been audited.
 
 ## Prototype goals
 
 - Keep the on-disk format simple and inspectable.
 - Keep serialization explicit and deterministic.
 - Expose ML-DSA and SLH-DSA as archive-level algorithm choices.
-- Preserve clear extension points for future ML-KEM + AEAD encryption work.
+- Keep signatures and ML-KEM + AEAD encryption separated and inspectable.
 - Make protocol choices easy to compare.
 
 ## Status
@@ -34,7 +35,10 @@ cargo build
 cargo test
 ```
 
-Build and test with real `liboqs` signatures on macOS:
+QSRL currently builds and runs from source. Prebuilt application bundles and
+`.dmg` packaging are not provided yet.
+
+Set up and test with real `liboqs` signatures on macOS:
 
 ```bash
 brew install liboqs
@@ -58,90 +62,101 @@ cargo run --features desktop-ui,liboqs-backend --bin qsrl-desktop
 Initialize local defaults:
 
 ```bash
-cargo run -- init
+cargo run --bin qsrl -- init
 ```
 
 Generate a keypair:
 
 ```bash
-cargo run -- keygen --alg ml-dsa
+cargo run --bin qsrl -- keygen --alg ml-dsa
 ```
 
 Generate a real `liboqs` keypair:
 
 ```bash
-cargo run --features liboqs-backend -- keygen --alg ml-dsa
-cargo run --features liboqs-backend -- keygen --alg slh-dsa
+cargo run --features liboqs-backend --bin qsrl -- keygen --alg ml-dsa
+cargo run --features liboqs-backend --bin qsrl -- keygen --alg slh-dsa
 ```
 
-Generate an ML-KEM recipient keypair:
-
-```bash
-cargo run --features liboqs-backend -- recipient-keygen --alg ml-kem
-```
+Signed-only CLI flow:
 
 Pack a directory:
 
 ```bash
-cargo run -- pack examples/sample_input -o examples/sample.qsrl
-```
-
-Pack an encrypted archive for one or more recipients:
-
-```bash
-cargo run --features liboqs-backend -- pack examples/sample_input -o examples/sample-encrypted.qsrl --recipient keys/ml-kem-001.public
+cargo run --bin qsrl -- pack examples/sample_input -o examples/sample.qsrl
 ```
 
 Sign and verify:
 
 ```bash
-cargo run -- sign examples/sample.qsrl --key keys/ml-dsa-001.private
-cargo run -- verify examples/sample.qsrl --pubkey keys/ml-dsa-001.public
+cargo run --bin qsrl -- sign examples/sample.qsrl --key keys/ml-dsa-001.private
+cargo run --bin qsrl -- verify examples/sample.qsrl --pubkey keys/ml-dsa-001.public
 ```
 
 Extract the archive back to a directory:
 
 ```bash
-cargo run -- extract examples/sample.qsrl -o examples/unpacked --pubkey keys/ml-dsa-001.public
+cargo run --bin qsrl -- extract examples/sample.qsrl -o examples/unpacked --pubkey keys/ml-dsa-001.public
 ```
 
-Decrypt and extract an encrypted archive:
+Signed + encrypted CLI flow:
+
+Generate an ML-KEM recipient keypair:
 
 ```bash
-cargo run --features liboqs-backend -- extract examples/sample-encrypted.qsrl -o examples/unpacked-encrypted --pubkey keys/ml-dsa-001.public --recipient-key keys/ml-kem-001.private
+cargo run --features liboqs-backend --bin qsrl -- recipient-keygen --alg ml-kem
+```
+
+Pack an encrypted archive for one or more recipients:
+
+```bash
+cargo run --features liboqs-backend --bin qsrl -- pack examples/sample_input -o examples/sample-encrypted.qsrl --recipient keys/ml-kem-001.public
+```
+
+Sign and verify the encrypted archive manifest:
+
+```bash
+cargo run --features liboqs-backend --bin qsrl -- sign examples/sample-encrypted.qsrl --key keys/ml-dsa-001.private
+cargo run --features liboqs-backend --bin qsrl -- verify examples/sample-encrypted.qsrl --pubkey keys/ml-dsa-001.public
+```
+
+Decrypt and extract the encrypted archive:
+
+```bash
+cargo run --features liboqs-backend --bin qsrl -- extract examples/sample-encrypted.qsrl -o examples/unpacked-encrypted --pubkey keys/ml-dsa-001.public --recipient-key keys/ml-kem-001.private
 ```
 
 For detached signatures, pass the sibling signature file explicitly:
 
 ```bash
-cargo run -- extract examples/sample-detached.qsrl -o examples/unpacked-detached --pubkey keys/ml-dsa-001.public --sig examples/sample-detached.qsrl.sig
+cargo run --bin qsrl -- extract examples/sample-detached.qsrl -o examples/unpacked-detached --pubkey keys/ml-dsa-001.public --sig examples/sample-detached.qsrl.sig
 ```
 
 Sign and verify with the real backend:
 
 ```bash
-cargo run --features liboqs-backend -- sign examples/sample.qsrl --key keys/ml-dsa-001.private
-cargo run --features liboqs-backend -- verify examples/sample.qsrl --pubkey keys/ml-dsa-001.public
+cargo run --features liboqs-backend --bin qsrl -- sign examples/sample.qsrl --key keys/ml-dsa-001.private
+cargo run --features liboqs-backend --bin qsrl -- verify examples/sample.qsrl --pubkey keys/ml-dsa-001.public
 ```
 
 Inspect the archive:
 
 ```bash
-cargo run -- inspect examples/sample.qsrl
+cargo run --bin qsrl -- inspect examples/sample.qsrl
 ```
 
 Run the comparison harness:
 
 ```bash
-cargo run -- compare examples/sample_input -o comparison-output --key keys/ml-dsa-001.private
+cargo run --bin qsrl -- compare examples/sample_input -o comparison-output --key keys/ml-dsa-001.private
 ```
 
 ## Architecture
 
-QSRL keeps signatures separate from future encryption on purpose. Authenticity
-binds the canonical manifest and optional block table, which lets the archive
-format stabilize around deterministic packaging first. Confidentiality layers on
-top by encrypting only the archive payload blob, while recipient records carry
+QSRL keeps signatures separate from encryption on purpose. Authenticity binds
+the canonical manifest and optional block table, which lets the archive format
+stabilize around deterministic packaging first. Confidentiality layers on top by
+encrypting only the archive payload blob, while recipient records carry
 ML-KEM-wrapped access to a random archive key. That keeps the signed identity
 model stable: signatures continue to bind canonical packaging choices and file
 identity, while encryption controls who can recover the payload contents.
