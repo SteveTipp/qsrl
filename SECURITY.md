@@ -9,8 +9,8 @@ production secrets yet.
 Please report suspected vulnerabilities responsibly and avoid publishing exploit
 details publicly before maintainers have had time to review and respond.
 
-Contact: TODO before publication: add a dedicated security contact or reporting
-channel.
+Contact: Please open a private security advisory or use the repository's
+security reporting channel once the public GitHub repository is available.
 
 ## Scope
 
