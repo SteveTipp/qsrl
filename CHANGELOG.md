@@ -4,6 +4,12 @@ All notable local prototype milestones for Quantum Sealed Record Layer (QSRL)
 are summarized here. QSRL is experimental software and has not been audited for
 production security use.
 
+## v0.2.10
+
+- Updated release metadata before the initial GitHub developer-preview.
+- Set repository metadata to `https://github.com/SteveTipp/qsrl`.
+- Updated the security contact language for future GitHub security reporting.
+
 ## v0.2.9
 
 - Resolved Clippy warnings before the initial developer-preview release.
