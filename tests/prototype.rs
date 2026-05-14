@@ -7,14 +7,14 @@ use qsrl::archive::Archive;
 use qsrl::commands::{
     SettingsOverrides, extract_archive, keygen, pack_archive, sign_archive, verify_archive,
 };
-use qsrl::error::QsrlError;
-use qsrl::protocol::{
-    CompressionLayout, CompressionMode, SignatureAlgorithm, SignaturePlacement,
-};
 #[cfg(feature = "liboqs-backend")]
-use qsrl::commands::{extract_archive_with_recipient, pack_archive_with_recipients, recipient_keygen};
+use qsrl::commands::{
+    extract_archive_with_recipient, pack_archive_with_recipients, recipient_keygen,
+};
+use qsrl::error::QsrlError;
 #[cfg(feature = "liboqs-backend")]
 use qsrl::protocol::KemAlgorithm;
+use qsrl::protocol::{CompressionLayout, CompressionMode, SignatureAlgorithm, SignaturePlacement};
 
 fn fresh_temp_dir(label: &str) -> PathBuf {
     let dir = env::temp_dir().join(format!("qsrl-test-{label}-{}", qsrl::util::unique_id()));
@@ -133,6 +133,23 @@ fn pack_sign_verify_round_trip_for_slh_dsa() {
     let result = verify_archive(&archive, &public_key, None).expect("verify archive");
     assert!(result.contains("signature: ok"));
     assert!(result.contains("algorithm: slh-dsa"));
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_private_key_file_is_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("key-permissions");
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate key");
+    let private_key = root.join("keys").join("ml-dsa-001.private");
+
+    let mode = fs::metadata(&private_key)
+        .expect("private key metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
 }
 
 #[test]
@@ -272,6 +289,46 @@ fn extract_rejects_path_traversal() {
     assert!(!root.join("escape.txt").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn extract_rejects_existing_symlink_component() {
+    let root = fresh_temp_dir("extract-symlink");
+    let input = write_sample_input(&root);
+    let archive_path = root.join("symlink.qsrl");
+    let output = root.join("extracted");
+    let outside = root.join("outside");
+
+    pack_archive(&root, &input, &archive_path, SettingsOverrides::default()).expect("pack archive");
+    fs::create_dir_all(&output).expect("create output");
+    fs::create_dir_all(&outside).expect("create outside");
+    std::os::unix::fs::symlink(&outside, output.join("nested")).expect("create symlink");
+
+    let error =
+        extract_archive(&archive_path, &output, None, None).expect_err("extract should fail");
+    assert!(matches!(error, QsrlError::InvalidFormat(_)));
+    assert!(!outside.join("b.txt").exists());
+}
+
+#[test]
+fn extract_refuses_to_overwrite_existing_file() {
+    let root = fresh_temp_dir("extract-overwrite");
+    let input = write_sample_input(&root);
+    let archive_path = root.join("overwrite.qsrl");
+    let output = root.join("extracted");
+
+    pack_archive(&root, &input, &archive_path, SettingsOverrides::default()).expect("pack archive");
+    fs::create_dir_all(&output).expect("create output");
+    fs::write(output.join("a.txt"), b"keep me").expect("write existing file");
+
+    let error =
+        extract_archive(&archive_path, &output, None, None).expect_err("extract should fail");
+    assert!(matches!(error, QsrlError::Usage(_)));
+    assert_eq!(
+        fs::read(output.join("a.txt")).expect("read existing file"),
+        b"keep me"
+    );
+}
+
 #[test]
 fn extract_rejects_corruption_before_writing() {
     let root = fresh_temp_dir("extract-corruption");
@@ -291,6 +348,70 @@ fn extract_rejects_corruption_before_writing() {
         extract_archive(&archive_path, &output, None, None).expect_err("extract should fail");
     assert!(matches!(error, QsrlError::DataCorruption(_)));
     assert!(!output.exists());
+}
+
+#[test]
+fn sparse_text_manifest_index_is_rejected() {
+    let root = fresh_temp_dir("sparse-manifest");
+    let input = write_sample_input(&root);
+    let archive_path = root.join("sparse.qsrl");
+
+    pack_archive(&root, &input, &archive_path, SettingsOverrides::default()).expect("pack archive");
+    let mut archive = Archive::read_from_path(&archive_path).expect("read archive");
+    let manifest = String::from_utf8(archive.manifest_bytes.clone()).expect("manifest utf8");
+    archive.manifest_bytes = manifest
+        .replace("file.0.path=", "file.999999.path=")
+        .into_bytes();
+    archive
+        .write_to_path(&archive_path)
+        .expect("rewrite archive");
+
+    let error = Archive::read_from_path(&archive_path).expect_err("sparse manifest should fail");
+    assert!(matches!(error, QsrlError::InvalidFormat(_)));
+}
+
+#[test]
+fn huge_block_table_count_is_rejected_before_allocation() {
+    let root = fresh_temp_dir("huge-block-count");
+    let input = write_sample_input(&root);
+    let archive_path = root.join("huge-block-count.qsrl");
+
+    pack_archive(&root, &input, &archive_path, SettingsOverrides::default()).expect("pack archive");
+    let mut archive = Archive::read_from_path(&archive_path).expect("read archive");
+    archive.block_table_bytes[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+    archive
+        .write_to_path(&archive_path)
+        .expect("rewrite archive");
+
+    let error = Archive::read_from_path(&archive_path).expect_err("huge block count should fail");
+    assert!(matches!(error, QsrlError::InvalidFormat(_)));
+}
+
+#[test]
+fn trailing_archive_bytes_are_rejected() {
+    let root = fresh_temp_dir("trailing-bytes");
+    let input = write_sample_input(&root);
+    let archive_path = root.join("trailing.qsrl");
+
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate key");
+    let private_key = root.join("keys").join("ml-dsa-001.private");
+    let public_key = root.join("keys").join("ml-dsa-001.public");
+
+    pack_archive(&root, &input, &archive_path, SettingsOverrides::default()).expect("pack archive");
+    sign_archive(
+        &archive_path,
+        &private_key,
+        Some(SignaturePlacement::Embedded),
+        None,
+    )
+    .expect("sign archive");
+
+    let mut bytes = fs::read(&archive_path).expect("read archive bytes");
+    bytes.extend_from_slice(b"trailing junk");
+    fs::write(&archive_path, bytes).expect("rewrite archive");
+
+    let error = verify_archive(&archive_path, &public_key, None).expect_err("verify should fail");
+    assert!(matches!(error, QsrlError::InvalidFormat(_)));
 }
 
 #[cfg(feature = "liboqs-backend")]
@@ -329,7 +450,10 @@ fn encrypted_archive_creation_and_decrypt_extract_round_trip() {
     let verify_output =
         verify_archive(&archive, &signature_public_key, None).expect("verify archive");
     assert!(verify_output.contains("signature: ok"));
-    assert!(verify_output.contains("file hashes: not checked"));
+    assert!(
+        verify_output
+            .contains("signature only; encrypted payload not authenticated until decrypt/extract")
+    );
 
     let extract_output = extract_archive_with_recipient(
         &archive,
@@ -451,7 +575,10 @@ fn signed_only_and_signed_plus_encrypted_archives_coexist() {
     .expect("sign encrypted archive");
     let encrypted_verify = verify_archive(&encrypted_archive, &signature_public_key, None)
         .expect("verify encrypted archive");
-    assert!(encrypted_verify.contains("file hashes: not checked"));
+    assert!(
+        encrypted_verify
+            .contains("signature only; encrypted payload not authenticated until decrypt/extract")
+    );
 
     extract_archive_with_recipient(
         &encrypted_archive,

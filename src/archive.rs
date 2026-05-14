@@ -152,16 +152,36 @@ impl Archive {
 
         let header = ArchiveHeader::deserialize(&bytes[..ArchiveHeader::SIZE])?;
         let manifest_start = ArchiveHeader::SIZE;
-        let manifest_end = checked_end(manifest_start, header.manifest_len as usize, bytes.len())?;
-        let block_table_end =
-            checked_end(manifest_end, header.block_table_len as usize, bytes.len())?;
-        let encryption_end = checked_end(
-            block_table_end,
-            header.recipient_records_len as usize,
+        let manifest_end = checked_end(
+            manifest_start,
+            checked_section_len(header.manifest_len, "manifest")?,
             bytes.len(),
         )?;
-        let payload_end = checked_end(encryption_end, header.payload_len as usize, bytes.len())?;
-        let signature_end = checked_end(payload_end, header.signature_len as usize, bytes.len())?;
+        let block_table_end = checked_end(
+            manifest_end,
+            checked_section_len(header.block_table_len, "block table")?,
+            bytes.len(),
+        )?;
+        let encryption_end = checked_end(
+            block_table_end,
+            checked_section_len(header.recipient_records_len, "recipient records")?,
+            bytes.len(),
+        )?;
+        let payload_end = checked_end(
+            encryption_end,
+            checked_section_len(header.payload_len, "payload")?,
+            bytes.len(),
+        )?;
+        let signature_end = checked_end(
+            payload_end,
+            checked_section_len(header.signature_len, "signature")?,
+            bytes.len(),
+        )?;
+        if signature_end != bytes.len() {
+            return Err(QsrlError::InvalidFormat(
+                "archive contains trailing bytes after declared sections".into(),
+            ));
+        }
 
         let manifest_bytes = bytes[manifest_start..manifest_end].to_vec();
         let block_table_bytes = bytes[manifest_end..block_table_end].to_vec();
@@ -367,9 +387,10 @@ impl Archive {
     fn extract_per_file_payloads(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
         let mut files = Vec::with_capacity(self.block_table.entries.len());
         for entry in &self.block_table.entries {
-            let start = entry.stored_offset as usize;
+            let start = checked_section_len(entry.stored_offset, "stored block offset")?;
+            let stored_len = checked_section_len(entry.stored_len, "stored block length")?;
             let end = start
-                .checked_add(entry.stored_len as usize)
+                .checked_add(stored_len)
                 .ok_or_else(|| QsrlError::DataCorruption("stored block overflow".into()))?;
             if end > payload.len() {
                 return Err(QsrlError::DataCorruption(
@@ -377,26 +398,30 @@ impl Archive {
                 ));
             }
             let stored = &payload[start..end];
-            let raw = decompress(entry.compression, stored, Some(entry.raw_len as usize))?;
+            let raw_len = checked_section_len(entry.raw_len, "raw block length")?;
+            let raw = decompress(entry.compression, stored, Some(raw_len))?;
             files.push(raw);
         }
         Ok(files)
     }
 
     fn extract_whole_archive_payloads(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
-        let total_raw_len = self
-            .block_table
-            .entries
-            .iter()
-            .map(|entry| entry.raw_offset + entry.raw_len)
-            .max()
-            .unwrap_or(0) as usize;
+        let mut total_raw_len = 0u64;
+        for entry in &self.block_table.entries {
+            let end = entry
+                .raw_offset
+                .checked_add(entry.raw_len)
+                .ok_or_else(|| QsrlError::DataCorruption("raw block overflow".into()))?;
+            total_raw_len = total_raw_len.max(end);
+        }
+        let total_raw_len = checked_section_len(total_raw_len, "total raw payload length")?;
         let raw_payload = decompress(self.manifest.compression_mode, payload, Some(total_raw_len))?;
         let mut files = Vec::with_capacity(self.block_table.entries.len());
         for entry in &self.block_table.entries {
-            let start = entry.raw_offset as usize;
+            let start = checked_section_len(entry.raw_offset, "raw block offset")?;
+            let raw_len = checked_section_len(entry.raw_len, "raw block length")?;
             let end = start
-                .checked_add(entry.raw_len as usize)
+                .checked_add(raw_len)
                 .ok_or_else(|| QsrlError::DataCorruption("raw block overflow".into()))?;
             if end > raw_payload.len() {
                 return Err(QsrlError::DataCorruption(
@@ -446,4 +471,10 @@ fn checked_end(start: usize, len: usize, max: usize) -> Result<usize> {
         ));
     }
     Ok(end)
+}
+
+fn checked_section_len(len: u64, label: &str) -> Result<usize> {
+    usize::try_from(len).map_err(|_| {
+        QsrlError::InvalidFormat(format!("{label} section length does not fit this platform"))
+    })
 }

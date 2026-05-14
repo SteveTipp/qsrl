@@ -252,14 +252,14 @@ pub fn verify_report(request: &VerifyRequest) -> Result<VerifyReport> {
         request.signature_path.as_deref(),
     )?;
     let file_hash_status = if archive.is_encrypted() {
-        "not checked".to_string()
+        "signature only; encrypted payload not authenticated until decrypt/extract".to_string()
     } else {
         archive.verify_file_hashes()?;
         "ok".to_string()
     };
     let log = if archive.is_encrypted() {
         format!(
-            "verified {}\n{}\nfile hashes: not checked (encrypted payload; use qsrl extract --recipient-key to decrypt and verify contents)\nfiles checked: {}\nplacement: {}\nalgorithm: {}",
+            "verified {}\n{}\nfile hashes: signature only; encrypted payload not authenticated until decrypt/extract\nfiles checked: {}\nplacement: {}\nalgorithm: {}",
             request.archive_path.display(),
             signature_status,
             archive.manifest.files.len(),

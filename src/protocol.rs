@@ -13,6 +13,15 @@ const ENCRYPTION_MAGIC: &[u8; 4] = b"QENC";
 
 pub const ARCHIVE_FLAG_EMBEDDED_SIGNATURE: u8 = 0x01;
 pub const ARCHIVE_FLAG_ENCRYPTED_PAYLOAD: u8 = 0x02;
+pub const MAX_MANIFEST_FILES: usize = 100_000;
+pub const MAX_BLOCK_ENTRIES: usize = 100_000;
+pub const MAX_RECIPIENT_RECORDS: usize = 1_024;
+
+const BINARY_MANIFEST_PREFIX_LEN: usize = 18;
+const MIN_BINARY_FILE_ENTRY_LEN: usize = 43;
+const BLOCK_TABLE_PREFIX_LEN: usize = 10;
+const BLOCK_ENTRY_LEN: usize = 40;
+const MIN_RECIPIENT_RECORD_LEN: usize = 44;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SignatureAlgorithm {
@@ -426,6 +435,7 @@ impl Manifest {
                 "manifest text header must start with qsrl-manifest-v1".into(),
             ));
         }
+        let body_lines: Vec<&str> = lines.collect();
 
         #[derive(Default)]
         struct PartialFileEntry {
@@ -443,10 +453,36 @@ impl Manifest {
         let mut compression_mode = None;
         let mut compression_layout = None;
         let mut file_count = None;
-        let mut files: Vec<PartialFileEntry> = Vec::new();
 
-        for line in lines {
-            if line.trim().is_empty() {
+        for line in &body_lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (key, value) = line.split_once('=').ok_or_else(|| {
+                QsrlError::InvalidFormat(format!("invalid manifest line '{line}'"))
+            })?;
+            if key == "file-count" {
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| QsrlError::Parse("invalid file count".into()))?;
+                if file_count.replace(parsed).is_some() {
+                    return Err(QsrlError::InvalidFormat(
+                        "manifest file-count is duplicated".into(),
+                    ));
+                }
+            }
+        }
+        let expected_count = file_count
+            .ok_or_else(|| QsrlError::InvalidFormat("manifest file-count is missing".into()))?;
+        validate_record_count(expected_count, MAX_MANIFEST_FILES, "manifest file count")?;
+        let mut files: Vec<PartialFileEntry> = (0..expected_count)
+            .map(|_| PartialFileEntry::default())
+            .collect();
+
+        for line in body_lines {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
             let (key, value) = line.split_once('=').ok_or_else(|| {
@@ -472,13 +508,7 @@ impl Manifest {
                 "compression-layout" => {
                     compression_layout = Some(CompressionLayout::from_str(value)?)
                 }
-                "file-count" => {
-                    file_count = Some(
-                        value
-                            .parse::<usize>()
-                            .map_err(|_| QsrlError::Parse("invalid file count".into()))?,
-                    )
-                }
+                "file-count" => {}
                 "path-normalization" | "timestamps" => {}
                 _ if key.starts_with("file.") => {
                     let rest = key
@@ -490,8 +520,10 @@ impl Manifest {
                     let index = index_text
                         .parse::<usize>()
                         .map_err(|_| QsrlError::Parse("invalid file index".into()))?;
-                    if files.len() <= index {
-                        files.resize_with(index + 1, PartialFileEntry::default);
+                    if index >= expected_count {
+                        return Err(QsrlError::InvalidFormat(format!(
+                            "manifest file index {index} is outside declared file-count {expected_count}"
+                        )));
                     }
                     let entry = &mut files[index];
                     match field {
@@ -530,15 +562,6 @@ impl Manifest {
                     )));
                 }
             }
-        }
-
-        let expected_count = file_count
-            .ok_or_else(|| QsrlError::InvalidFormat("manifest file-count is missing".into()))?;
-        if files.len() != expected_count {
-            return Err(QsrlError::InvalidFormat(format!(
-                "manifest declared {expected_count} files but encoded {}",
-                files.len()
-            )));
         }
 
         let files = files
@@ -665,6 +688,19 @@ impl Manifest {
                 .expect("one byte"),
         )?;
         let file_count = read_u32_le(bytes, &mut cursor, "file count")? as usize;
+        validate_record_count(file_count, MAX_MANIFEST_FILES, "manifest file count")?;
+        if bytes.len() < BINARY_MANIFEST_PREFIX_LEN {
+            return Err(QsrlError::InvalidFormat(
+                "binary manifest is shorter than its fixed prefix".into(),
+            ));
+        }
+        let max_possible =
+            bytes.len().saturating_sub(BINARY_MANIFEST_PREFIX_LEN) / MIN_BINARY_FILE_ENTRY_LEN;
+        if file_count > max_possible {
+            return Err(QsrlError::InvalidFormat(format!(
+                "binary manifest declared {file_count} files but section length can hold at most {max_possible}"
+            )));
+        }
         let mut files = Vec::with_capacity(file_count);
         for _ in 0..file_count {
             let path_len = read_u16_le(bytes, &mut cursor, "file path length")? as usize;
@@ -686,6 +722,11 @@ impl Manifest {
                 sha256: digest,
                 compression,
             });
+        }
+        if cursor != bytes.len() {
+            return Err(QsrlError::InvalidFormat(
+                "binary manifest has trailing bytes".into(),
+            ));
         }
 
         Ok(Self {
@@ -744,6 +785,18 @@ impl BlockTable {
             return Err(QsrlError::UnsupportedVersion(version));
         }
         let count = read_u32_le(bytes, &mut cursor, "block entry count")? as usize;
+        validate_record_count(count, MAX_BLOCK_ENTRIES, "block entry count")?;
+        if bytes.len() < BLOCK_TABLE_PREFIX_LEN {
+            return Err(QsrlError::InvalidFormat(
+                "block table is shorter than its fixed prefix".into(),
+            ));
+        }
+        let remaining = bytes.len().saturating_sub(BLOCK_TABLE_PREFIX_LEN);
+        if remaining != count.saturating_mul(BLOCK_ENTRY_LEN) {
+            return Err(QsrlError::InvalidFormat(format!(
+                "block table declared {count} entries but section length is inconsistent"
+            )));
+        }
         let mut entries = Vec::with_capacity(count);
         for _ in 0..count {
             let stored_offset = read_u64_le(bytes, &mut cursor, "stored offset")?;
@@ -763,6 +816,11 @@ impl BlockTable {
                 raw_len,
                 compression,
             });
+        }
+        if cursor != bytes.len() {
+            return Err(QsrlError::InvalidFormat(
+                "block table has trailing bytes".into(),
+            ));
         }
         Ok(Self { entries })
     }
@@ -999,6 +1057,11 @@ impl EncryptionSection {
             .first()
             .expect("one byte") as usize;
         let recipient_count = read_u32_le(bytes, &mut cursor, "recipient count")? as usize;
+        validate_record_count(
+            recipient_count,
+            MAX_RECIPIENT_RECORDS,
+            "recipient record count",
+        )?;
         let method_name_len = read_u16_le(bytes, &mut cursor, "KEM method name length")? as usize;
         let _reserved = take_bytes(bytes, &mut cursor, 2, "encryption section padding")?;
         let kem_method_name = String::from_utf8(
@@ -1007,6 +1070,19 @@ impl EncryptionSection {
         .map_err(|_| QsrlError::InvalidFormat("KEM method name is not valid UTF-8".into()))?;
         let payload_nonce =
             take_bytes(bytes, &mut cursor, payload_nonce_len, "payload nonce")?.to_vec();
+        let remaining = bytes.len().saturating_sub(cursor);
+        if remaining < payload_tag_len {
+            return Err(QsrlError::InvalidFormat(
+                "encryption section is too short for payload tag".into(),
+            ));
+        }
+        let max_possible_recipients =
+            remaining.saturating_sub(payload_tag_len) / MIN_RECIPIENT_RECORD_LEN;
+        if recipient_count > max_possible_recipients {
+            return Err(QsrlError::InvalidFormat(format!(
+                "encryption section declared {recipient_count} recipients but section length can hold at most {max_possible_recipients}"
+            )));
+        }
 
         let mut recipients = Vec::with_capacity(recipient_count);
         for _ in 0..recipient_count {
@@ -1130,6 +1206,11 @@ impl SignatureRecord {
         )?);
         let signature_len = read_u32_le(bytes, &mut cursor, "signature length")? as usize;
         let signature = take_bytes(bytes, &mut cursor, signature_len, "signature bytes")?.to_vec();
+        if cursor != bytes.len() {
+            return Err(QsrlError::InvalidFormat(
+                "signature record has trailing bytes".into(),
+            ));
+        }
         Ok(Self {
             algorithm,
             scope,
@@ -1141,11 +1222,21 @@ impl SignatureRecord {
     }
 }
 
+fn validate_record_count(count: usize, max: usize, label: &str) -> Result<()> {
+    if count > max {
+        return Err(QsrlError::InvalidFormat(format!(
+            "{label} {count} exceeds prototype cap {max}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CompressionLayout, CompressionMode, FileEntry, Manifest, ManifestEncoding,
-        SignatureAlgorithm, SignaturePlacement, SignatureScope,
+        AeadAlgorithm, CompressionLayout, CompressionMode, EncryptionSection, FileEntry,
+        KemAlgorithm, Manifest, ManifestEncoding, SignatureAlgorithm, SignaturePlacement,
+        SignatureScope,
     };
 
     #[test]
@@ -1168,5 +1259,22 @@ mod tests {
         let bytes = manifest.serialize().expect("serialize");
         let decoded = Manifest::deserialize(&bytes, ManifestEncoding::TextV1).expect("deserialize");
         assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn encryption_section_rejects_huge_recipient_count() {
+        let section = EncryptionSection {
+            kem_algorithm: KemAlgorithm::MlKem,
+            kem_method_name: "ML-KEM-768".into(),
+            aead_algorithm: AeadAlgorithm::Aes256Gcm,
+            payload_nonce: vec![0u8; 12],
+            payload_tag: vec![0u8; 16],
+            recipients: Vec::new(),
+        };
+        let mut bytes = section.serialize().expect("serialize encryption section");
+        bytes[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = EncryptionSection::deserialize(&bytes).expect_err("huge count should fail");
+        assert!(matches!(error, crate::error::QsrlError::InvalidFormat(_)));
     }
 }

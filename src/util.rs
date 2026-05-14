@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -111,13 +110,16 @@ pub fn take_bytes<'a>(
     len: usize,
     context: &str,
 ) -> Result<&'a [u8]> {
-    if *cursor + len > bytes.len() {
+    let end = cursor
+        .checked_add(len)
+        .ok_or_else(|| QsrlError::InvalidFormat(format!("{context} length overflowed")))?;
+    if end > bytes.len() {
         return Err(QsrlError::InvalidFormat(format!(
             "truncated {context}: expected {len} more bytes"
         )));
     }
-    let slice = &bytes[*cursor..*cursor + len];
-    *cursor += len;
+    let slice = &bytes[*cursor..end];
+    *cursor = end;
     Ok(slice)
 }
 
@@ -219,36 +221,26 @@ pub fn unique_id() -> String {
 }
 
 pub fn read_random_bytes(len: usize) -> Result<Vec<u8>> {
-    let mut buffer = vec![0u8; len];
-    match fs::File::open("/dev/urandom") {
-        Ok(mut file) => {
-            file.read_exact(&mut buffer)
-                .map_err(|err| QsrlError::io("reading /dev/urandom", err))?;
-            Ok(buffer)
-        }
-        Err(_) => Ok(fallback_random_bytes(len)),
-    }
+    read_random_bytes_with(len, getrandom::fill)
 }
 
-fn fallback_random_bytes(len: usize) -> Vec<u8> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut state = (nanos as u64) ^ ((std::process::id() as u64) << 16);
+fn read_random_bytes_with<E>(
+    len: usize,
+    fill: impl FnOnce(&mut [u8]) -> std::result::Result<(), E>,
+) -> Result<Vec<u8>>
+where
+    E: std::fmt::Display,
+{
     let mut buffer = vec![0u8; len];
-    for byte in &mut buffer {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        *byte = (state & 0xff) as u8;
-    }
-    buffer
+    fill(&mut buffer).map_err(|err| {
+        QsrlError::UnsupportedFeature(format!("secure random byte generation failed: {err}"))
+    })?;
+    Ok(buffer)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_decode, hex_encode};
+    use super::{hex_decode, hex_encode, read_random_bytes_with};
 
     #[test]
     fn hex_round_trip() {
@@ -256,5 +248,15 @@ mod tests {
         let encoded = hex_encode(&data);
         let decoded = hex_decode(&encoded).expect("hex decode should work");
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn random_generation_fails_closed() {
+        let error = read_random_bytes_with(32, |_buffer| Err("forced RNG failure"))
+            .expect_err("RNG failure should be returned");
+        assert!(matches!(
+            error,
+            crate::error::QsrlError::UnsupportedFeature(_)
+        ));
     }
 }

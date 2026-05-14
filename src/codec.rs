@@ -15,7 +15,7 @@ pub fn decompress(
 ) -> Result<Vec<u8>> {
     let output = match mode {
         CompressionMode::None => data.to_vec(),
-        CompressionMode::Rle => decompress_rle(data)?,
+        CompressionMode::Rle => decompress_rle(data, expected_len)?,
     };
     if let Some(expected_len) = expected_len {
         if output.len() != expected_len {
@@ -51,16 +51,28 @@ fn compress_rle(data: &[u8]) -> Vec<u8> {
     output
 }
 
-fn decompress_rle(data: &[u8]) -> Result<Vec<u8>> {
+fn decompress_rle(data: &[u8], expected_len: Option<usize>) -> Result<Vec<u8>> {
     if data.len() % 2 != 0 {
         return Err(QsrlError::DataCorruption(
             "RLE payload must contain count/value pairs".into(),
         ));
     }
 
-    let mut output = Vec::new();
+    let mut output = Vec::with_capacity(expected_len.unwrap_or(0));
     for pair in data.chunks_exact(2) {
-        output.extend(std::iter::repeat_n(pair[1], pair[0] as usize));
+        let count = pair[0] as usize;
+        let next_len = output
+            .len()
+            .checked_add(count)
+            .ok_or_else(|| QsrlError::DataCorruption("RLE expansion length overflowed".into()))?;
+        if let Some(expected_len) = expected_len {
+            if next_len > expected_len {
+                return Err(QsrlError::DataCorruption(format!(
+                    "RLE expansion exceeded expected length {expected_len}"
+                )));
+            }
+        }
+        output.extend(std::iter::repeat_n(pair[1], count));
     }
     Ok(output)
 }
@@ -77,5 +89,12 @@ mod tests {
         let decompressed =
             decompress(CompressionMode::Rle, &compressed, Some(raw.len())).expect("rle decode");
         assert_eq!(decompressed, raw);
+    }
+
+    #[test]
+    fn rle_rejects_expansion_past_expected_length() {
+        let error = decompress(CompressionMode::Rle, &[255, b'a'], Some(1))
+            .expect_err("oversized RLE expansion should fail");
+        assert!(matches!(error, crate::error::QsrlError::DataCorruption(_)));
     }
 }

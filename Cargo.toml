@@ -14,6 +14,7 @@ desktop-ui = ["dep:eframe", "dep:rfd"]
 
 [dependencies]
 eframe = { version = "0.34.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
+getrandom = "0.3.4"
 rfd = { version = "0.17.2", default-features = false, optional = true }
 
 [build-dependencies]

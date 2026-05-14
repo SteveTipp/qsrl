@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -11,7 +12,8 @@ use crate::crypto::{
     generate_keypair, generate_recipient_keypair, load_private_key, load_public_key,
     load_recipient_private_key, load_recipient_public_key, message_digest, sign_message,
     unwrap_archive_key_for_recipient, verify_signature, wrap_archive_key_for_recipient,
-    write_private_key, write_public_key, write_recipient_private_key, write_recipient_public_key,
+    write_new_private_key, write_new_recipient_private_key, write_private_key, write_public_key,
+    write_recipient_public_key,
 };
 use crate::error::{QsrlError, Result};
 use crate::protocol::{
@@ -110,7 +112,7 @@ pub fn keygen(root: &Path, algorithm: SignatureAlgorithm) -> Result<String> {
     let (private_key, public_key) = generate_keypair(algorithm, key_id.clone())?;
     let private_path = keys_dir.join(format!("{key_id}.private"));
     let public_path = keys_dir.join(format!("{key_id}.public"));
-    write_private_key(&private_path, &private_key)?;
+    write_new_private_key(&private_path, &private_key)?;
     write_public_key(&public_path, &public_key)?;
     let mut output = format!(
         "generated {} keypair\nprivate key: {}\npublic key: {}\nbackend: {}\nmethod: {}",
@@ -138,7 +140,7 @@ pub fn recipient_keygen(root: &Path, algorithm: KemAlgorithm) -> Result<String> 
     let (private_key, public_key) = generate_recipient_keypair(algorithm, key_id.clone())?;
     let private_path = keys_dir.join(format!("{key_id}.private"));
     let public_path = keys_dir.join(format!("{key_id}.public"));
-    write_recipient_private_key(&private_path, &private_key)?;
+    write_new_recipient_private_key(&private_path, &private_key)?;
     write_recipient_public_key(&public_path, &public_key)?;
     let mut output = format!(
         "generated {} recipient keypair\nprivate key: {}\npublic key: {}\nbackend: {}\nmethod: {}",
@@ -239,7 +241,8 @@ pub fn verify_archive(
     let signature_status =
         verify_archive_signature(&archive, archive_path, public_key_path, signature_path)?;
     let file_hash_status: String = if archive.is_encrypted() {
-        "file hashes: not checked (encrypted payload; use qsrl extract --recipient-key to decrypt and verify contents)".into()
+        "file hashes: signature only; encrypted payload not authenticated until decrypt/extract"
+            .into()
     } else {
         archive.verify_file_hashes()?;
         "file hashes: ok".into()
@@ -310,13 +313,19 @@ pub fn extract_archive_with_recipient(
     archive.verify_decoded_files(&files)?;
     let relative_paths = planned_output_paths(&archive, output_dir)?;
 
-    fs::create_dir_all(output_dir)
-        .map_err(|err| QsrlError::io(format!("creating {}", output_dir.display()), err))?;
+    prepare_output_directory(output_dir)?;
+    validate_extraction_destinations(output_dir, &relative_paths)?;
 
     for (relative_path, data) in relative_paths.iter().zip(files.iter()) {
         let destination = output_dir.join(relative_path);
-        ensure_parent_dir(&destination)?;
-        fs::write(&destination, data)
+        create_output_parent_dirs(output_dir, relative_path)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = options
+            .open(&destination)
+            .map_err(|err| QsrlError::io(format!("writing {}", destination.display()), err))?;
+        use std::io::Write;
+        file.write_all(data)
             .map_err(|err| QsrlError::io(format!("writing {}", destination.display()), err))?;
     }
 
@@ -904,4 +913,149 @@ fn safe_output_relative_path(path_text: &str) -> Result<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+fn prepare_output_directory(output_dir: &Path) -> Result<()> {
+    match fs::symlink_metadata(output_dir) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(QsrlError::InvalidFormat(format!(
+                    "output directory must not be a symlink: {}",
+                    output_dir.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(QsrlError::Usage(format!(
+                    "output directory path points to a file: {}",
+                    output_dir.display()
+                )));
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            fs::create_dir_all(output_dir)
+                .map_err(|err| QsrlError::io(format!("creating {}", output_dir.display()), err))?;
+        }
+        Err(err) => {
+            return Err(QsrlError::io(
+                format!("reading metadata for {}", output_dir.display()),
+                err,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_extraction_destinations(output_dir: &Path, relative_paths: &[PathBuf]) -> Result<()> {
+    for relative_path in relative_paths {
+        reject_existing_symlink_components(output_dir, relative_path)?;
+        let destination = output_dir.join(relative_path);
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(QsrlError::InvalidFormat(format!(
+                        "refusing to extract through existing symlink {}",
+                        destination.display()
+                    )));
+                }
+                return Err(QsrlError::Usage(format!(
+                    "refusing to overwrite existing output path {}",
+                    destination.display()
+                )));
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(QsrlError::io(
+                    format!("reading metadata for {}", destination.display()),
+                    err,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_existing_symlink_components(output_dir: &Path, relative_path: &Path) -> Result<()> {
+    let mut current = output_dir.to_path_buf();
+    if let Some(parent) = relative_path.parent() {
+        for component in parent.components() {
+            match component {
+                Component::CurDir => continue,
+                Component::Normal(part) => current.push(part),
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(QsrlError::InvalidFormat(format!(
+                        "archive path '{}' would escape the output directory",
+                        relative_path.display()
+                    )));
+                }
+            }
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(QsrlError::InvalidFormat(format!(
+                        "refusing to extract through existing symlink {}",
+                        current.display()
+                    )));
+                }
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(QsrlError::Usage(format!(
+                        "output path component is not a directory: {}",
+                        current.display()
+                    )));
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => break,
+                Err(err) => {
+                    return Err(QsrlError::io(
+                        format!("reading metadata for {}", current.display()),
+                        err,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_output_parent_dirs(output_dir: &Path, relative_path: &Path) -> Result<()> {
+    let mut current = output_dir.to_path_buf();
+    if let Some(parent) = relative_path.parent() {
+        for component in parent.components() {
+            match component {
+                Component::CurDir => continue,
+                Component::Normal(part) => current.push(part),
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(QsrlError::InvalidFormat(format!(
+                        "archive path '{}' would escape the output directory",
+                        relative_path.display()
+                    )));
+                }
+            }
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(QsrlError::InvalidFormat(format!(
+                        "refusing to extract through existing symlink {}",
+                        current.display()
+                    )));
+                }
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(QsrlError::Usage(format!(
+                        "output path component is not a directory: {}",
+                        current.display()
+                    )));
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    fs::create_dir(&current).map_err(|err| {
+                        QsrlError::io(format!("creating {}", current.display()), err)
+                    })?;
+                }
+                Err(err) => {
+                    return Err(QsrlError::io(
+                        format!("reading metadata for {}", current.display()),
+                        err,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }

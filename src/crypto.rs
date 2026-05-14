@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 
 use crate::error::{QsrlError, Result};
 use crate::protocol::{KemAlgorithm, RecipientRecord, SignatureAlgorithm};
 use crate::sha256::{digest, digest_parts};
-use crate::util::{hex_decode, hex_encode, read_random_bytes, read_string, write_string};
+use crate::util::{
+    ensure_parent_dir, hex_decode, hex_encode, read_random_bytes, read_string, write_string,
+};
 
 pub const STUB_IMPLEMENTATION_CODE: u8 = 1;
 pub const STUB_IMPLEMENTATION_LABEL: &str = "stub-lamport-v1";
@@ -277,6 +280,14 @@ pub fn decrypt_aead(
 }
 
 pub fn write_private_key(path: &Path, key: &PrivateKey) -> Result<()> {
+    write_private_key_file(path, &private_key_contents(key), true)
+}
+
+pub fn write_new_private_key(path: &Path, key: &PrivateKey) -> Result<()> {
+    write_private_key_file(path, &private_key_contents(key), false)
+}
+
+fn private_key_contents(key: &PrivateKey) -> String {
     let mut contents = String::new();
     contents.push_str("# Quantum Sealed Record Layer prototype key file\n");
     contents.push_str("type = \"private\"\n");
@@ -306,7 +317,7 @@ pub fn write_private_key(path: &Path, key: &PrivateKey) -> Result<()> {
         hex_encode(&key.secret_key_bytes)
     ));
     contents.push_str(&format!("uses = {}\n", key.uses));
-    write_string(path, &contents)
+    contents
 }
 
 pub fn write_public_key(path: &Path, key: &PublicKey) -> Result<()> {
@@ -338,6 +349,14 @@ pub fn write_public_key(path: &Path, key: &PublicKey) -> Result<()> {
 }
 
 pub fn write_recipient_private_key(path: &Path, key: &KemPrivateKey) -> Result<()> {
+    write_private_key_file(path, &recipient_private_key_contents(key), true)
+}
+
+pub fn write_new_recipient_private_key(path: &Path, key: &KemPrivateKey) -> Result<()> {
+    write_private_key_file(path, &recipient_private_key_contents(key), false)
+}
+
+fn recipient_private_key_contents(key: &KemPrivateKey) -> String {
     let mut contents = String::new();
     contents.push_str("# Quantum Sealed Record Layer prototype recipient key file\n");
     contents.push_str("type = \"private\"\n");
@@ -367,7 +386,46 @@ pub fn write_recipient_private_key(path: &Path, key: &KemPrivateKey) -> Result<(
         "secret_key = \"{}\"\n",
         hex_encode(&key.secret_key_bytes)
     ));
-    write_string(path, &contents)
+    contents
+}
+
+fn write_private_key_file(path: &Path, contents: &str, allow_overwrite: bool) -> Result<()> {
+    ensure_parent_dir(path)?;
+    if allow_overwrite {
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() {
+                return Err(QsrlError::Usage(format!(
+                    "refusing to write private key through symlink {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if allow_overwrite {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|err| QsrlError::io(format!("writing {}", path.display()), err))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        file.set_permissions(permissions).map_err(|err| {
+            QsrlError::io(format!("setting permissions on {}", path.display()), err)
+        })?;
+    }
+    file.write_all(contents.as_bytes())
+        .map_err(|err| QsrlError::io(format!("writing {}", path.display()), err))
 }
 
 pub fn write_recipient_public_key(path: &Path, key: &KemPublicKey) -> Result<()> {
