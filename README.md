@@ -32,7 +32,7 @@ Build:
 
 ```bash
 cargo build
-cargo test
+cargo test --locked
 ```
 
 QSRL currently builds and runs from source. Prebuilt application bundles and
@@ -44,8 +44,20 @@ Set up and test with real `liboqs` signatures on macOS:
 brew install liboqs
 export LIBOQS_DIR="$(brew --prefix liboqs)"
 export PKG_CONFIG_PATH="$LIBOQS_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-cargo test --features liboqs-backend
+cargo test --locked --features liboqs-backend
 ```
+
+Release validation should use the pinned `Cargo.lock` dependency graph:
+
+```bash
+cargo test --locked
+cargo test --locked --features liboqs-backend
+cargo check --locked --features desktop-ui --bin qsrl-desktop
+cargo check --locked --features desktop-ui,liboqs-backend --bin qsrl-desktop
+```
+
+Dependency updates should be intentional and reviewed. See
+[docs/dependency-policy.md](docs/dependency-policy.md).
 
 Launch the local desktop UI on macOS:
 
@@ -169,8 +181,8 @@ signature-record structure, and CLI shape.
 
 Build modes:
 
-- Stub-only mode: `cargo test`
-- Real `liboqs` mode: `cargo test --features liboqs-backend`
+- Stub-only mode: `cargo test --locked`
+- Real `liboqs` mode: `cargo test --locked --features liboqs-backend`
 
 Current family-to-parameter mapping in `liboqs` mode:
 

@@ -3,10 +3,10 @@
 Use this local checklist before making Quantum Sealed Record Layer (QSRL)
 public.
 
-- Run `cargo test`.
-- Run `cargo test --features liboqs-backend`.
-- Run `cargo check --features desktop-ui --bin qsrl-desktop`.
-- Run `cargo check --features desktop-ui,liboqs-backend --bin qsrl-desktop`.
+- Run `cargo test --locked`.
+- Run `cargo test --locked --features liboqs-backend`.
+- Run `cargo check --locked --features desktop-ui --bin qsrl-desktop`.
+- Run `cargo check --locked --features desktop-ui,liboqs-backend --bin qsrl-desktop`.
 - Launch the desktop UI locally and smoke-test pack, sign, verify, extract, and
   inspect.
 - Verify no generated keys, private keys, private archives, detached
