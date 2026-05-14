@@ -237,10 +237,10 @@ impl Archive {
             output.extend_from_slice(&encryption.serialize().expect("encryption serialize"));
         }
         output.extend_from_slice(&self.payload);
-        if self.header.signature_placement == SignaturePlacement::Embedded {
-            if let Some(signature) = &self.signature {
-                output.extend_from_slice(&signature.serialize());
-            }
+        if self.header.signature_placement == SignaturePlacement::Embedded
+            && let Some(signature) = &self.signature
+        {
+            output.extend_from_slice(&signature.serialize());
         }
         output
     }

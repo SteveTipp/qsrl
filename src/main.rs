@@ -8,10 +8,6 @@ use qsrl::commands::{
     verify_archive,
 };
 use qsrl::error::{QsrlError, Result};
-use qsrl::protocol::{
-    CompressionLayout, CompressionMode, KemAlgorithm, ManifestEncoding, SignatureAlgorithm,
-    SignaturePlacement, SignatureScope,
-};
 
 fn main() {
     match run() {
@@ -55,11 +51,11 @@ fn run() -> Result<String> {
             )
         }
         "keygen" => {
-            let algorithm = SignatureAlgorithm::from_str(parsed.required_value(["--alg"])?)?;
+            let algorithm = parsed.required_value(["--alg"])?.parse()?;
             keygen(&cwd, algorithm)
         }
         "recipient-keygen" => {
-            let algorithm = KemAlgorithm::from_str(parsed.required_value(["--alg"])?)?;
+            let algorithm = parsed.required_value(["--alg"])?.parse()?;
             recipient_keygen(&cwd, algorithm)
         }
         "sign" => {
@@ -68,7 +64,7 @@ fn run() -> Result<String> {
             let key_path = parsed.required_path(["--key"])?;
             let placement = parsed
                 .optional_value(["--placement"])?
-                .map(SignaturePlacement::from_str)
+                .map(str::parse)
                 .transpose()?;
             let signature_path = parsed.optional_path(["--sig"])?;
             sign_archive(
@@ -204,27 +200,27 @@ impl ParsedArgs {
                 .transpose()?,
             signature_algorithm: self
                 .optional_value(["--alg"])?
-                .map(SignatureAlgorithm::from_str)
+                .map(str::parse)
                 .transpose()?,
             signature_placement: self
                 .optional_value(["--placement"])?
-                .map(SignaturePlacement::from_str)
+                .map(str::parse)
                 .transpose()?,
             signature_scope: self
                 .optional_value(["--scope"])?
-                .map(SignatureScope::from_str)
+                .map(str::parse)
                 .transpose()?,
             manifest_encoding: self
                 .optional_value(["--manifest-encoding"])?
-                .map(ManifestEncoding::from_str)
+                .map(str::parse)
                 .transpose()?,
             compression_mode: self
                 .optional_value(["--compression"])?
-                .map(CompressionMode::from_str)
+                .map(str::parse)
                 .transpose()?,
             compression_layout: self
                 .optional_value(["--compression-layout"])?
-                .map(CompressionLayout::from_str)
+                .map(str::parse)
                 .transpose()?,
         })
     }

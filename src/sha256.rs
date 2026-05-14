@@ -25,7 +25,7 @@ fn maj(x: u32, y: u32, z: u32) -> u32 {
 
 #[inline]
 fn rotate_right(value: u32, shift: u32) -> u32 {
-    (value >> shift) | (value << (32 - shift))
+    value.rotate_right(shift)
 }
 
 #[inline]
@@ -52,7 +52,7 @@ pub fn digest(input: &[u8]) -> [u8; 32] {
     let mut data = input.to_vec();
     let bit_len = (data.len() as u64) * 8;
     data.push(0x80);
-    while (data.len() + 8) % 64 != 0 {
+    while !(data.len() + 8).is_multiple_of(64) {
         data.push(0);
     }
     data.extend_from_slice(&bit_len.to_be_bytes());

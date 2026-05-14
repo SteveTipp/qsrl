@@ -669,10 +669,10 @@ fn next_named_key_id(keys_dir: &Path, name: &str) -> Result<String> {
                 continue;
             }
             let stem = name.trim_end_matches(".private");
-            if let Some(number_text) = stem.strip_prefix(&prefix) {
-                if let Ok(number) = number_text.parse::<usize>() {
-                    next_index = next_index.max(number + 1);
-                }
+            if let Some(number_text) = stem.strip_prefix(&prefix)
+                && let Ok(number) = number_text.parse::<usize>()
+            {
+                next_index = next_index.max(number + 1);
             }
         }
     }

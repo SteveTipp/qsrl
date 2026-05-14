@@ -670,11 +670,11 @@ impl QsrlDesktopApp {
             }
             if let Some(action) = &self.status.action {
                 ui.add_space(6.0);
-                if ui.button(action.label).clicked() {
-                    if let Err(error) = open_in_file_manager(&action.path) {
-                        ui.ctx().copy_text(action.path.display().to_string());
-                        ui.label(format!("Could not open folder: {error}"));
-                    }
+                if ui.button(action.label).clicked()
+                    && let Err(error) = open_in_file_manager(&action.path)
+                {
+                    ui.ctx().copy_text(action.path.display().to_string());
+                    ui.label(format!("Could not open folder: {error}"));
                 }
                 ui.label(RichText::new(action.path.display().to_string()).small());
             }
@@ -746,12 +746,11 @@ impl QsrlDesktopApp {
                 ui.horizontal(|ui| {
                     ui.label(format!("Recipient {}", index + 1));
                     ui.text_edit_singleline(path);
-                    if ui.button("Browse").clicked() {
-                        if let Some(selected) =
+                    if ui.button("Browse").clicked()
+                        && let Some(selected) =
                             pick_file(&self.root, path, Some(("Public keys", &["public"])))
-                        {
-                            *path = selected.display().to_string();
-                        }
+                    {
+                        *path = selected.display().to_string();
                     }
                     if recipient_count > 1 && ui.button("Remove").clicked() {
                         remove_index = Some(index);
@@ -1166,10 +1165,10 @@ fn path_row_directory(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut S
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked() {
-            if let Some(selected) = pick_folder(root, value) {
-                *value = selected.display().to_string();
-            }
+        if ui.button("Browse").clicked()
+            && let Some(selected) = pick_folder(root, value)
+        {
+            *value = selected.display().to_string();
         }
         copy_path_button(ui, value);
     });
@@ -1191,10 +1190,10 @@ fn path_row_file(
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked() {
-            if let Some(selected) = pick_file(root, value, filter) {
-                *value = selected.display().to_string();
-            }
+        if ui.button("Browse").clicked()
+            && let Some(selected) = pick_file(root, value, filter)
+        {
+            *value = selected.display().to_string();
         }
         copy_path_button(ui, value);
     });
@@ -1210,15 +1209,15 @@ fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mu
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked() {
-            if let Some(selected) = save_file(
+        if ui.button("Browse").clicked()
+            && let Some(selected) = save_file(
                 root,
                 value,
                 "archive.qsrl",
                 Some(("QSRL archives", &["qsrl"])),
-            ) {
-                *value = ensure_extension(selected, "qsrl").display().to_string();
-            }
+            )
+        {
+            *value = ensure_extension(selected, "qsrl").display().to_string();
         }
         copy_path_button(ui, value);
     });
@@ -1234,15 +1233,15 @@ fn path_row_save_signature(ui: &mut egui::Ui, root: &Path, label: &str, value: &
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked() {
-            if let Some(selected) = save_file(
+        if ui.button("Browse").clicked()
+            && let Some(selected) = save_file(
                 root,
                 value,
                 "archive.qsrl.sig",
                 Some(("Signature files", &["sig"])),
-            ) {
-                *value = ensure_extension(selected, "sig").display().to_string();
-            }
+            )
+        {
+            *value = ensure_extension(selected, "sig").display().to_string();
         }
         copy_path_button(ui, value);
     });

@@ -391,15 +391,14 @@ fn recipient_private_key_contents(key: &KemPrivateKey) -> String {
 
 fn write_private_key_file(path: &Path, contents: &str, allow_overwrite: bool) -> Result<()> {
     ensure_parent_dir(path)?;
-    if allow_overwrite {
-        if let Ok(metadata) = std::fs::symlink_metadata(path) {
-            if metadata.file_type().is_symlink() {
-                return Err(QsrlError::Usage(format!(
-                    "refusing to write private key through symlink {}",
-                    path.display()
-                )));
-            }
-        }
+    if allow_overwrite
+        && let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(QsrlError::Usage(format!(
+            "refusing to write private key through symlink {}",
+            path.display()
+        )));
     }
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
@@ -461,7 +460,7 @@ pub fn load_private_key(path: &Path) -> Result<PrivateKey> {
     let map = parse_key_file(path)?;
     ensure_key_type(&map, "private")?;
     let implementation = KeyImplementation::from_label(required_field(&map, "implementation")?)?;
-    let algorithm = SignatureAlgorithm::from_str(required_field(&map, "algorithm")?)?;
+    let algorithm = required_field(&map, "algorithm")?.parse()?;
     let key_id = required_field(&map, "key_id")?.to_string();
     let method_name = determine_method_name(implementation, algorithm, &map)?.to_string();
     validate_method_name(implementation, algorithm, &method_name)?;
@@ -499,7 +498,7 @@ pub fn load_public_key(path: &Path) -> Result<PublicKey> {
     let map = parse_key_file(path)?;
     ensure_key_type(&map, "public")?;
     let implementation = KeyImplementation::from_label(required_field(&map, "implementation")?)?;
-    let algorithm = SignatureAlgorithm::from_str(required_field(&map, "algorithm")?)?;
+    let algorithm = required_field(&map, "algorithm")?.parse()?;
     let key_id = required_field(&map, "key_id")?.to_string();
     let method_name = determine_method_name(implementation, algorithm, &map)?.to_string();
     validate_method_name(implementation, algorithm, &method_name)?;
@@ -532,7 +531,7 @@ pub fn load_recipient_private_key(path: &Path) -> Result<KemPrivateKey> {
     ensure_key_type(&map, "private")?;
     ensure_key_usage(&map, "recipient")?;
     let implementation = KeyImplementation::from_label(required_field(&map, "implementation")?)?;
-    let algorithm = KemAlgorithm::from_str(required_field(&map, "algorithm")?)?;
+    let algorithm = required_field(&map, "algorithm")?.parse()?;
     let key_id = required_field(&map, "key_id")?.to_string();
     let method_name = determine_kem_method_name(implementation, algorithm, &map)?.to_string();
     validate_kem_method_name(implementation, algorithm, &method_name)?;
@@ -568,7 +567,7 @@ pub fn load_recipient_public_key(path: &Path) -> Result<KemPublicKey> {
     ensure_key_type(&map, "public")?;
     ensure_key_usage(&map, "recipient")?;
     let implementation = KeyImplementation::from_label(required_field(&map, "implementation")?)?;
-    let algorithm = KemAlgorithm::from_str(required_field(&map, "algorithm")?)?;
+    let algorithm = required_field(&map, "algorithm")?.parse()?;
     let key_id = required_field(&map, "key_id")?.to_string();
     let method_name = determine_kem_method_name(implementation, algorithm, &map)?.to_string();
     validate_kem_method_name(implementation, algorithm, &method_name)?;
@@ -1075,11 +1074,11 @@ fn ensure_key_usage(fields: &BTreeMap<String, String>, expected_usage: &str) -> 
     Ok(())
 }
 
-fn determine_method_name<'a>(
+fn determine_method_name(
     implementation: KeyImplementation,
     algorithm: SignatureAlgorithm,
-    fields: &'a BTreeMap<String, String>,
-) -> Result<&'a str> {
+    fields: &BTreeMap<String, String>,
+) -> Result<&str> {
     if let Some(value) = optional_field(fields, "method_name") {
         return Ok(value);
     }
@@ -1091,11 +1090,11 @@ fn determine_method_name<'a>(
     }
 }
 
-fn determine_kem_method_name<'a>(
+fn determine_kem_method_name(
     implementation: KeyImplementation,
     algorithm: KemAlgorithm,
-    fields: &'a BTreeMap<String, String>,
-) -> Result<&'a str> {
+    fields: &BTreeMap<String, String>,
+) -> Result<&str> {
     if let Some(value) = optional_field(fields, "method_name") {
         return Ok(value);
     }

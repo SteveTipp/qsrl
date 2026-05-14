@@ -48,7 +48,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 
 pub fn hex_decode(value: &str) -> Result<Vec<u8>> {
     let trimmed = value.trim();
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err(QsrlError::Parse(
             "hex value must contain an even number of characters".into(),
         ));

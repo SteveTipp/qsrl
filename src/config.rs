@@ -67,20 +67,12 @@ impl RepoConfig {
                         .parse::<u16>()
                         .map_err(|_| QsrlError::Parse("invalid format_version".into()))?
                 }
-                "signature_algorithm" => {
-                    config.signature_algorithm = SignatureAlgorithm::from_str(value)?
-                }
-                "signature_placement" => {
-                    config.signature_placement = SignaturePlacement::from_str(value)?
-                }
-                "signature_scope" => config.signature_scope = SignatureScope::from_str(value)?,
-                "manifest_encoding" => {
-                    config.manifest_encoding = ManifestEncoding::from_str(value)?
-                }
-                "compression_mode" => config.compression_mode = CompressionMode::from_str(value)?,
-                "compression_layout" => {
-                    config.compression_layout = CompressionLayout::from_str(value)?
-                }
+                "signature_algorithm" => config.signature_algorithm = value.parse()?,
+                "signature_placement" => config.signature_placement = value.parse()?,
+                "signature_scope" => config.signature_scope = value.parse()?,
+                "manifest_encoding" => config.manifest_encoding = value.parse()?,
+                "compression_mode" => config.compression_mode = value.parse()?,
+                "compression_layout" => config.compression_layout = value.parse()?,
                 other => return Err(QsrlError::Parse(format!("unknown config key '{other}'"))),
             }
         }

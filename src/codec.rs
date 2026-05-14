@@ -17,13 +17,13 @@ pub fn decompress(
         CompressionMode::None => data.to_vec(),
         CompressionMode::Rle => decompress_rle(data, expected_len)?,
     };
-    if let Some(expected_len) = expected_len {
-        if output.len() != expected_len {
-            return Err(QsrlError::DataCorruption(format!(
-                "decompressed payload length {} did not match expected {expected_len}",
-                output.len()
-            )));
-        }
+    if let Some(expected_len) = expected_len
+        && output.len() != expected_len
+    {
+        return Err(QsrlError::DataCorruption(format!(
+            "decompressed payload length {} did not match expected {expected_len}",
+            output.len()
+        )));
     }
     Ok(output)
 }
@@ -52,7 +52,7 @@ fn compress_rle(data: &[u8]) -> Vec<u8> {
 }
 
 fn decompress_rle(data: &[u8], expected_len: Option<usize>) -> Result<Vec<u8>> {
-    if data.len() % 2 != 0 {
+    if !data.len().is_multiple_of(2) {
         return Err(QsrlError::DataCorruption(
             "RLE payload must contain count/value pairs".into(),
         ));
@@ -65,12 +65,12 @@ fn decompress_rle(data: &[u8], expected_len: Option<usize>) -> Result<Vec<u8>> {
             .len()
             .checked_add(count)
             .ok_or_else(|| QsrlError::DataCorruption("RLE expansion length overflowed".into()))?;
-        if let Some(expected_len) = expected_len {
-            if next_len > expected_len {
-                return Err(QsrlError::DataCorruption(format!(
-                    "RLE expansion exceeded expected length {expected_len}"
-                )));
-            }
+        if let Some(expected_len) = expected_len
+            && next_len > expected_len
+        {
+            return Err(QsrlError::DataCorruption(format!(
+                "RLE expansion exceeded expected length {expected_len}"
+            )));
         }
         output.extend(std::iter::repeat_n(pair[1], count));
     }

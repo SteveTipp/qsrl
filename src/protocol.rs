@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::FORMAT_VERSION;
 use crate::error::{QsrlError, Result};
 use crate::util::{
@@ -37,16 +39,6 @@ impl SignatureAlgorithm {
         }
     }
 
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "ml-dsa" => Ok(Self::MlDsa),
-            "slh-dsa" => Ok(Self::SlhDsa),
-            other => Err(QsrlError::UnsupportedAlgorithm(format!(
-                "unsupported signature algorithm '{other}'"
-            ))),
-        }
-    }
-
     pub fn code(self) -> u8 {
         match self {
             Self::MlDsa => 1,
@@ -65,6 +57,20 @@ impl SignatureAlgorithm {
     }
 }
 
+impl FromStr for SignatureAlgorithm {
+    type Err = QsrlError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "ml-dsa" => Ok(Self::MlDsa),
+            "slh-dsa" => Ok(Self::SlhDsa),
+            other => Err(QsrlError::UnsupportedAlgorithm(format!(
+                "unsupported signature algorithm '{other}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SignaturePlacement {
     Embedded,
@@ -76,16 +82,6 @@ impl SignaturePlacement {
         match self {
             Self::Embedded => "embedded",
             Self::Detached => "detached",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "embedded" => Ok(Self::Embedded),
-            "detached" => Ok(Self::Detached),
-            other => Err(QsrlError::Parse(format!(
-                "unsupported signature placement '{other}'"
-            ))),
         }
     }
 
@@ -107,6 +103,20 @@ impl SignaturePlacement {
     }
 }
 
+impl FromStr for SignaturePlacement {
+    type Err = QsrlError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "embedded" => Ok(Self::Embedded),
+            "detached" => Ok(Self::Detached),
+            other => Err(QsrlError::Parse(format!(
+                "unsupported signature placement '{other}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SignatureScope {
     Manifest,
@@ -120,17 +130,6 @@ impl SignatureScope {
             Self::Manifest => "manifest",
             Self::ManifestAndBlockTable => "manifest+block-table",
             Self::PerFileExperimental => "per-file",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "manifest" => Ok(Self::Manifest),
-            "manifest+block-table" => Ok(Self::ManifestAndBlockTable),
-            "per-file" => Ok(Self::PerFileExperimental),
-            other => Err(QsrlError::Parse(format!(
-                "unsupported signature scope '{other}'"
-            ))),
         }
     }
 
@@ -154,6 +153,21 @@ impl SignatureScope {
     }
 }
 
+impl FromStr for SignatureScope {
+    type Err = QsrlError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "manifest" => Ok(Self::Manifest),
+            "manifest+block-table" => Ok(Self::ManifestAndBlockTable),
+            "per-file" => Ok(Self::PerFileExperimental),
+            other => Err(QsrlError::Parse(format!(
+                "unsupported signature scope '{other}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManifestEncoding {
     TextV1,
@@ -165,16 +179,6 @@ impl ManifestEncoding {
         match self {
             Self::TextV1 => "text-v1",
             Self::BinaryV1 => "binary-v1",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "text-v1" => Ok(Self::TextV1),
-            "binary-v1" => Ok(Self::BinaryV1),
-            other => Err(QsrlError::Parse(format!(
-                "unsupported manifest encoding '{other}'"
-            ))),
         }
     }
 
@@ -196,6 +200,20 @@ impl ManifestEncoding {
     }
 }
 
+impl FromStr for ManifestEncoding {
+    type Err = QsrlError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "text-v1" => Ok(Self::TextV1),
+            "binary-v1" => Ok(Self::BinaryV1),
+            other => Err(QsrlError::Parse(format!(
+                "unsupported manifest encoding '{other}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompressionMode {
     None,
@@ -207,16 +225,6 @@ impl CompressionMode {
         match self {
             Self::None => "none",
             Self::Rle => "rle",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "none" => Ok(Self::None),
-            "rle" => Ok(Self::Rle),
-            other => Err(QsrlError::Parse(format!(
-                "unsupported compression mode '{other}'"
-            ))),
         }
     }
 
@@ -238,6 +246,20 @@ impl CompressionMode {
     }
 }
 
+impl FromStr for CompressionMode {
+    type Err = QsrlError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "rle" => Ok(Self::Rle),
+            other => Err(QsrlError::Parse(format!(
+                "unsupported compression mode '{other}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompressionLayout {
     PerFile,
@@ -249,16 +271,6 @@ impl CompressionLayout {
         match self {
             Self::PerFile => "per-file",
             Self::WholeArchive => "whole-archive",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "per-file" => Ok(Self::PerFile),
-            "whole-archive" => Ok(Self::WholeArchive),
-            other => Err(QsrlError::Parse(format!(
-                "unsupported compression layout '{other}'"
-            ))),
         }
     }
 
@@ -280,6 +292,20 @@ impl CompressionLayout {
     }
 }
 
+impl FromStr for CompressionLayout {
+    type Err = QsrlError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "per-file" => Ok(Self::PerFile),
+            "whole-archive" => Ok(Self::WholeArchive),
+            other => Err(QsrlError::Parse(format!(
+                "unsupported compression layout '{other}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KemAlgorithm {
     MlKem,
@@ -289,15 +315,6 @@ impl KemAlgorithm {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MlKem => "ml-kem",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "ml-kem" => Ok(Self::MlKem),
-            other => Err(QsrlError::UnsupportedAlgorithm(format!(
-                "unsupported KEM algorithm '{other}'"
-            ))),
         }
     }
 
@@ -312,6 +329,19 @@ impl KemAlgorithm {
             1 => Ok(Self::MlKem),
             other => Err(QsrlError::UnsupportedAlgorithm(format!(
                 "unsupported KEM algorithm code {other}"
+            ))),
+        }
+    }
+}
+
+impl FromStr for KemAlgorithm {
+    type Err = QsrlError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "ml-kem" => Ok(Self::MlKem),
+            other => Err(QsrlError::UnsupportedAlgorithm(format!(
+                "unsupported KEM algorithm '{other}'"
             ))),
         }
     }
@@ -496,18 +526,12 @@ impl Manifest {
                             QsrlError::Parse("invalid manifest format version".into())
                         })?)
                 }
-                "signature-algorithm" => {
-                    signature_algorithm = Some(SignatureAlgorithm::from_str(value)?)
-                }
-                "signature-placement" => {
-                    signature_placement = Some(SignaturePlacement::from_str(value)?)
-                }
-                "signature-scope" => signature_scope = Some(SignatureScope::from_str(value)?),
-                "manifest-encoding" => manifest_encoding = Some(ManifestEncoding::from_str(value)?),
-                "compression-mode" => compression_mode = Some(CompressionMode::from_str(value)?),
-                "compression-layout" => {
-                    compression_layout = Some(CompressionLayout::from_str(value)?)
-                }
+                "signature-algorithm" => signature_algorithm = Some(value.parse()?),
+                "signature-placement" => signature_placement = Some(value.parse()?),
+                "signature-scope" => signature_scope = Some(value.parse()?),
+                "manifest-encoding" => manifest_encoding = Some(value.parse()?),
+                "compression-mode" => compression_mode = Some(value.parse()?),
+                "compression-layout" => compression_layout = Some(value.parse()?),
                 "file-count" => {}
                 "path-normalization" | "timestamps" => {}
                 _ if key.starts_with("file.") => {
@@ -546,9 +570,7 @@ impl Manifest {
                             digest.copy_from_slice(&decoded);
                             entry.sha256 = Some(digest);
                         }
-                        "compression" => {
-                            entry.compression = Some(CompressionMode::from_str(value)?)
-                        }
+                        "compression" => entry.compression = Some(value.parse()?),
                         _ => {
                             return Err(QsrlError::InvalidFormat(format!(
                                 "unknown manifest file field '{field}'"
