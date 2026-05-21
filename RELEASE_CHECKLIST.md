@@ -1,7 +1,8 @@
 # Release Checklist
 
-Use this local checklist before making Quantum Sealed Record Layer (QSRL)
-public.
+This checklist was used to validate Quantum Sealed Record Layer (QSRL) before its initial public developer-preview release.
+
+Use it again before future public releases or major updates.
 
 - Run `cargo test --locked`.
 - Run `cargo test --locked --features liboqs-backend`.
