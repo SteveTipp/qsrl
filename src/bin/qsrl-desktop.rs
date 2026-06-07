@@ -53,6 +53,11 @@ const QWORK_GREEN_DARK: Color32 = Color32::from_rgb(0, 24, 0);
 const QWORK_WHITE: Color32 = Color32::from_rgb(245, 245, 245);
 const QWORK_BLUE: Color32 = Color32::from_rgb(48, 128, 255);
 const QWORK_ERROR: Color32 = Color32::from_rgb(255, 88, 88);
+const FORM_LABEL_WIDTH: f32 = 300.0;
+const FORM_FIELD_WIDTH: f32 = 360.0;
+const FORM_ROW_HEIGHT: f32 = 24.0;
+const FORM_BROWSE_BUTTON_WIDTH: f32 = 72.0;
+const FORM_COPY_BUTTON_WIDTH: f32 = 52.0;
 
 fn apply_qwork_theme(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
@@ -752,9 +757,12 @@ impl QsrlDesktopApp {
             let recipient_count = self.pack_form.recipient_keys.len();
             for (index, path) in self.pack_form.recipient_keys.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Recipient {}", index + 1));
-                    ui.text_edit_singleline(path);
-                    if ui.button("Browse").clicked()
+                    form_label(ui, &format!("Recipient {}", index + 1));
+                    let response = form_text_field(ui, path);
+                    if !path.trim().is_empty() {
+                        response.on_hover_text(path.clone());
+                    }
+                    if browse_button(ui).clicked()
                         && let Some(selected) =
                             pick_file(&self.root, path, Some(("Public keys", &["public"])))
                     {
@@ -1166,22 +1174,40 @@ fn info_section(ui: &mut egui::Ui, title: &str, body: &str) {
     ui.add_space(12.0);
 }
 
+fn form_label(ui: &mut egui::Ui, label: &str) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(FORM_LABEL_WIDTH, FORM_ROW_HEIGHT),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.label(RichText::new(label).strong().color(QWORK_GREEN));
+        },
+    );
+}
+
+fn form_text_field(ui: &mut egui::Ui, value: &mut String) -> egui::Response {
+    ui.add_sized(
+        [FORM_FIELD_WIDTH, FORM_ROW_HEIGHT],
+        TextEdit::singleline(value),
+    )
+}
+
+fn browse_button(ui: &mut egui::Ui) -> egui::Response {
+    ui.add_sized(
+        [FORM_BROWSE_BUTTON_WIDTH, FORM_ROW_HEIGHT],
+        egui::Button::new("Browse"),
+    )
+}
+
 fn metadata_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [160.0, 20.0],
-            egui::Label::new(RichText::new(label).strong()),
-        );
+        form_label(ui, label);
         hover_copy_value(ui, value, false);
     });
 }
 
 fn metadata_path_row(ui: &mut egui::Ui, label: &str, path: &Path) {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [160.0, 20.0],
-            egui::Label::new(RichText::new(label).strong()),
-        );
+        form_label(ui, label);
         hover_copy_value(ui, &path.display().to_string(), true);
     });
 }
@@ -1191,11 +1217,9 @@ where
     T: Copy + PartialEq,
 {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [160.0, 20.0],
-            egui::Label::new(RichText::new(label).strong()),
-        );
+        form_label(ui, label);
         egui::ComboBox::from_id_salt(label)
+            .width(FORM_FIELD_WIDTH)
             .selected_text(
                 options
                     .iter()
@@ -1212,15 +1236,12 @@ where
 
 fn path_row_directory(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [160.0, 20.0],
-            egui::Label::new(RichText::new(label).strong()),
-        );
-        let response = ui.text_edit_singleline(value);
+        form_label(ui, label);
+        let response = form_text_field(ui, value);
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked()
+        if browse_button(ui).clicked()
             && let Some(selected) = pick_folder(root, value)
         {
             *value = selected.display().to_string();
@@ -1237,15 +1258,12 @@ fn path_row_file(
     filter: Option<(&str, &[&str])>,
 ) {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [160.0, 20.0],
-            egui::Label::new(RichText::new(label).strong()),
-        );
-        let response = ui.text_edit_singleline(value);
+        form_label(ui, label);
+        let response = form_text_field(ui, value);
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked()
+        if browse_button(ui).clicked()
             && let Some(selected) = pick_file(root, value, filter)
         {
             *value = selected.display().to_string();
@@ -1256,15 +1274,12 @@ fn path_row_file(
 
 fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [160.0, 20.0],
-            egui::Label::new(RichText::new(label).strong()),
-        );
-        let response = ui.text_edit_singleline(value);
+        form_label(ui, label);
+        let response = form_text_field(ui, value);
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked()
+        if browse_button(ui).clicked()
             && let Some(selected) = save_file(
                 root,
                 value,
@@ -1280,15 +1295,12 @@ fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mu
 
 fn path_row_save_signature(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [160.0, 20.0],
-            egui::Label::new(RichText::new(label).strong()),
-        );
-        let response = ui.text_edit_singleline(value);
+        form_label(ui, label);
+        let response = form_text_field(ui, value);
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
-        if ui.button("Browse").clicked()
+        if browse_button(ui).clicked()
             && let Some(selected) = save_file(
                 root,
                 value,
@@ -1392,7 +1404,14 @@ fn copy_path_button(ui: &mut egui::Ui, value: &str) {
     if trimmed.is_empty() {
         return;
     }
-    if ui.small_button("Copy").on_hover_text("Copy path").clicked() {
+    if ui
+        .add_sized(
+            [FORM_COPY_BUTTON_WIDTH, FORM_ROW_HEIGHT],
+            egui::Button::new("Copy"),
+        )
+        .on_hover_text("Copy path")
+        .clicked()
+    {
         ui.ctx().copy_text(trimmed.to_string());
     }
 }
