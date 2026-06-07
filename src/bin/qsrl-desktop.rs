@@ -106,6 +106,7 @@ enum Workflow {
     Verify,
     Extract,
     Inspect,
+    Info,
 }
 
 impl Workflow {
@@ -117,10 +118,11 @@ impl Workflow {
             Self::Verify => "Verify",
             Self::Extract => "Extract",
             Self::Inspect => "Inspect",
+            Self::Info => "Info",
         }
     }
 
-    fn all() -> [Self; 6] {
+    fn main_workflows() -> [Self; 6] {
         [
             Self::Pack,
             Self::Keygen,
@@ -630,11 +632,8 @@ impl QsrlDesktopApp {
                 ui.heading("QSRL Desktop")
                     .on_hover_text("Made by Steve Tippeconnic");
                 ui.separator();
-                for workflow in Workflow::all() {
+                for workflow in Workflow::main_workflows() {
                     ui.selectable_value(&mut self.active_workflow, workflow, workflow.label());
-                }
-                if previous_workflow != self.active_workflow && !self.is_busy() {
-                    self.status = StatusBanner::empty();
                 }
                 ui.separator();
                 ui.label(RichText::new("Workspace").strong());
@@ -649,6 +648,15 @@ impl QsrlDesktopApp {
                 if let Some(label) = self.pending_label {
                     ui.add_space(12.0);
                     ui.label(RichText::new(format!("{label} running...")).strong());
+                }
+                ui.separator();
+                ui.selectable_value(
+                    &mut self.active_workflow,
+                    Workflow::Info,
+                    Workflow::Info.label(),
+                );
+                if previous_workflow != self.active_workflow && !self.is_busy() {
+                    self.status = StatusBanner::empty();
                 }
             });
     }
@@ -952,7 +960,7 @@ impl QsrlDesktopApp {
             path_row_file(
                 ui,
                 &self.root,
-                "Public key (optional)",
+                "Public key for signature check (optional)",
                 &mut self.extract_form.public_key_path,
                 Some(("Public keys", &["public"])),
             );
@@ -966,7 +974,7 @@ impl QsrlDesktopApp {
             path_row_file(
                 ui,
                 &self.root,
-                "Recipient private key (optional)",
+                "Recipient private key (required if encrypted)",
                 &mut self.extract_form.recipient_key_path,
                 Some(("Private keys", &["private"])),
             );
@@ -1067,6 +1075,50 @@ impl QsrlDesktopApp {
             });
         }
     }
+
+    fn render_info(&self, ui: &mut egui::Ui) {
+        ui.heading("Info");
+        ui.label("Local reference for the QSRL desktop sections.");
+        ui.add_space(8.0);
+
+        ScrollArea::vertical().show(ui, |ui| {
+            info_section(
+                ui,
+                "QSRL",
+                "QSRL is an experimental local archive/signing prototype. It packages folders into .qsrl archives, supports post-quantum signatures, supports recipient-based encrypted payloads, and keeps workflows local on disk.",
+            );
+            info_section(
+                ui,
+                "Keygen",
+                "Creates local ML-DSA, SLH-DSA, and ML-KEM keypairs. ML-DSA and SLH-DSA are used for signatures. ML-KEM is used for recipient key encapsulation. Private key files stay local.",
+            );
+            info_section(
+                ui,
+                "Pack",
+                "Packages a folder into a .qsrl archive. The archive records an inspectable manifest, file metadata, hashes, compression settings, and optional recipient encryption metadata.",
+            );
+            info_section(
+                ui,
+                "Sign",
+                "Signs an archive using a private signature key. QSRL supports embedded signatures and detached .sig files.",
+            );
+            info_section(
+                ui,
+                "Verify",
+                "Checks an archive signature using the matching public key. For encrypted archives, verification can check the signature, while encrypted payload authentication happens during decrypt/extract.",
+            );
+            info_section(
+                ui,
+                "Extract",
+                "Restores files from a .qsrl archive into an output folder. For signed archives, providing the public key checks the signature. For encrypted archives, the matching ML-KEM recipient private key is required to recover the archive key and decrypt the AES-256-GCM protected payload.",
+            );
+            info_section(
+                ui,
+                "Inspect",
+                "Reads archive metadata without extracting files. It shows the format version, signature information, manifest settings, compression settings, encryption status, recipient count, and file hashes.",
+            );
+        });
+    }
 }
 
 impl eframe::App for QsrlDesktopApp {
@@ -1106,9 +1158,17 @@ impl eframe::App for QsrlDesktopApp {
                 Workflow::Verify => self.render_verify(ui),
                 Workflow::Extract => self.render_extract(ui),
                 Workflow::Inspect => self.render_inspect(ui),
+                Workflow::Info => self.render_info(ui),
             }
         });
     }
+}
+
+fn info_section(ui: &mut egui::Ui, title: &str, body: &str) {
+    ui.label(RichText::new(title).strong().color(QWORK_GREEN));
+    ui.add_space(3.0);
+    ui.label(RichText::new(body).color(QWORK_WHITE));
+    ui.add_space(12.0);
 }
 
 fn metadata_row(ui: &mut egui::Ui, label: &str, value: &str) {
