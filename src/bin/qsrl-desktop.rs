@@ -1084,11 +1084,6 @@ impl QsrlDesktopApp {
         ScrollArea::vertical().show(ui, |ui| {
             info_section(
                 ui,
-                "QSRL",
-                "QSRL is an experimental local archive/signing prototype. It packages folders into .qsrl archives, supports post-quantum signatures, supports recipient-based encrypted payloads, and keeps workflows local on disk.",
-            );
-            info_section(
-                ui,
                 "Keygen",
                 "Creates local ML-DSA, SLH-DSA, and ML-KEM keypairs. ML-DSA and SLH-DSA are used for signatures. ML-KEM is used for recipient key encapsulation. Private key files stay local.",
             );
