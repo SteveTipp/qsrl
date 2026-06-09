@@ -55,6 +55,7 @@ const QWORK_BLUE: Color32 = Color32::from_rgb(48, 128, 255);
 const QWORK_ERROR: Color32 = Color32::from_rgb(255, 88, 88);
 const FORM_LABEL_WIDTH: f32 = 300.0;
 const FORM_FIELD_WIDTH: f32 = 360.0;
+const FORM_FIELD_MIN_WIDTH: f32 = 180.0;
 const FORM_ROW_HEIGHT: f32 = 24.0;
 const FORM_BROWSE_BUTTON_WIDTH: f32 = 72.0;
 const FORM_COPY_BUTTON_WIDTH: f32 = 52.0;
@@ -758,7 +759,11 @@ impl QsrlDesktopApp {
             for (index, path) in self.pack_form.recipient_keys.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     form_label(ui, &format!("Recipient {}", index + 1));
-                    let response = form_text_field(ui, path);
+                    let response = form_text_field(
+                        ui,
+                        path,
+                        FORM_BROWSE_BUTTON_WIDTH + ui.spacing().item_spacing.x,
+                    );
                     if !path.trim().is_empty() {
                         response.on_hover_text(path.clone());
                     }
@@ -1070,17 +1075,15 @@ impl QsrlDesktopApp {
 
             ui.add_space(8.0);
             ui.label(RichText::new("Files").strong());
-            ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                for file in &report.files {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        metadata_row(ui, "Path", &file.path);
-                        metadata_row(ui, "Size", &format!("{} bytes", file.size));
-                        metadata_row(ui, "SHA-256", &file.sha256_hex);
-                        metadata_row(ui, "Compression", file.compression.as_str());
-                    });
-                    ui.add_space(6.0);
-                }
-            });
+            for file in &report.files {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    metadata_row(ui, "Path", &file.path);
+                    metadata_row(ui, "Size", &format!("{} bytes", file.size));
+                    metadata_row(ui, "SHA-256", &file.sha256_hex);
+                    metadata_row(ui, "Compression", file.compression.as_str());
+                });
+                ui.add_space(6.0);
+            }
         }
     }
 
@@ -1155,13 +1158,22 @@ impl eframe::App for QsrlDesktopApp {
             self.render_status(ui);
             ui.add_space(10.0);
             match self.active_workflow {
-                Workflow::Pack => self.render_pack(ui),
-                Workflow::Keygen => self.render_keygen(ui),
-                Workflow::Sign => self.render_sign(ui),
-                Workflow::Verify => self.render_verify(ui),
-                Workflow::Extract => self.render_extract(ui),
-                Workflow::Inspect => self.render_inspect(ui),
                 Workflow::Info => self.render_info(ui),
+                _ => {
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match self.active_workflow {
+                            Workflow::Pack => self.render_pack(ui),
+                            Workflow::Keygen => self.render_keygen(ui),
+                            Workflow::Sign => self.render_sign(ui),
+                            Workflow::Verify => self.render_verify(ui),
+                            Workflow::Extract => self.render_extract(ui),
+                            Workflow::Inspect => self.render_inspect(ui),
+                            Workflow::Info => {
+                                unreachable!("Info is rendered outside this scroll area")
+                            }
+                        });
+                }
             }
         });
     }
@@ -1184,9 +1196,17 @@ fn form_label(ui: &mut egui::Ui, label: &str) {
     );
 }
 
-fn form_text_field(ui: &mut egui::Ui, value: &mut String) -> egui::Response {
+fn responsive_field_width(ui: &egui::Ui, trailing_width: f32) -> f32 {
+    (ui.available_width() - trailing_width).clamp(FORM_FIELD_MIN_WIDTH, FORM_FIELD_WIDTH)
+}
+
+fn path_row_trailing_width(ui: &egui::Ui) -> f32 {
+    FORM_BROWSE_BUTTON_WIDTH + FORM_COPY_BUTTON_WIDTH + (ui.spacing().item_spacing.x * 2.0)
+}
+
+fn form_text_field(ui: &mut egui::Ui, value: &mut String, trailing_width: f32) -> egui::Response {
     ui.add_sized(
-        [FORM_FIELD_WIDTH, FORM_ROW_HEIGHT],
+        [responsive_field_width(ui, trailing_width), FORM_ROW_HEIGHT],
         TextEdit::singleline(value),
     )
 }
@@ -1219,7 +1239,7 @@ where
     ui.horizontal(|ui| {
         form_label(ui, label);
         egui::ComboBox::from_id_salt(label)
-            .width(FORM_FIELD_WIDTH)
+            .width(responsive_field_width(ui, 0.0))
             .selected_text(
                 options
                     .iter()
@@ -1237,7 +1257,7 @@ where
 fn path_row_directory(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
         form_label(ui, label);
-        let response = form_text_field(ui, value);
+        let response = form_text_field(ui, value, path_row_trailing_width(ui));
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
@@ -1259,7 +1279,7 @@ fn path_row_file(
 ) {
     ui.horizontal(|ui| {
         form_label(ui, label);
-        let response = form_text_field(ui, value);
+        let response = form_text_field(ui, value, path_row_trailing_width(ui));
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
@@ -1275,7 +1295,7 @@ fn path_row_file(
 fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
         form_label(ui, label);
-        let response = form_text_field(ui, value);
+        let response = form_text_field(ui, value, path_row_trailing_width(ui));
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
@@ -1296,7 +1316,7 @@ fn path_row_save_archive(ui: &mut egui::Ui, root: &Path, label: &str, value: &mu
 fn path_row_save_signature(ui: &mut egui::Ui, root: &Path, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
         form_label(ui, label);
-        let response = form_text_field(ui, value);
+        let response = form_text_field(ui, value, path_row_trailing_width(ui));
         if !value.trim().is_empty() {
             response.on_hover_text(value.clone());
         }
@@ -1402,6 +1422,7 @@ fn summary_lines(log: &str, max_lines: usize) -> Vec<String> {
 fn copy_path_button(ui: &mut egui::Ui, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
+        ui.allocate_space(egui::vec2(FORM_COPY_BUTTON_WIDTH, FORM_ROW_HEIGHT));
         return;
     }
     if ui
@@ -1417,18 +1438,26 @@ fn copy_path_button(ui: &mut egui::Ui, value: &str) {
 }
 
 fn hover_copy_value(ui: &mut egui::Ui, value: &str, monospace: bool) {
-    let shortened = shorten_middle(value, 72);
+    let copy_width = FORM_COPY_BUTTON_WIDTH + ui.spacing().item_spacing.x;
+    let value_width = (ui.available_width() - copy_width).max(80.0);
+    let available_chars = (value_width / 8.0).floor() as usize;
+    let shortened = shorten_middle(value, available_chars.clamp(8, 72));
     let text = if monospace {
         RichText::new(shortened.clone()).monospace()
     } else {
         RichText::new(shortened.clone())
     };
-    let response = ui.label(text).on_hover_text(value.to_string());
+    let response = ui
+        .add_sized([value_width, FORM_ROW_HEIGHT], egui::Label::new(text))
+        .on_hover_text(value.to_string());
     if response.double_clicked() {
         ui.ctx().copy_text(value.to_string());
     }
     if ui
-        .small_button("Copy")
+        .add_sized(
+            [FORM_COPY_BUTTON_WIDTH, FORM_ROW_HEIGHT],
+            egui::Button::new("Copy"),
+        )
         .on_hover_text("Copy full value")
         .clicked()
     {
