@@ -58,7 +58,7 @@ const FORM_FIELD_WIDTH: f32 = 360.0;
 const FORM_FIELD_MIN_WIDTH: f32 = 180.0;
 const FORM_ROW_HEIGHT: f32 = 24.0;
 const FORM_BROWSE_BUTTON_WIDTH: f32 = 72.0;
-const FORM_COPY_BUTTON_WIDTH: f32 = 52.0;
+const FORM_COPY_BUTTON_WIDTH: f32 = 72.0;
 
 fn apply_qwork_theme(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
@@ -759,11 +759,7 @@ impl QsrlDesktopApp {
             for (index, path) in self.pack_form.recipient_keys.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     form_label(ui, &format!("Recipient {}", index + 1));
-                    let response = form_text_field(
-                        ui,
-                        path,
-                        FORM_BROWSE_BUTTON_WIDTH + ui.spacing().item_spacing.x,
-                    );
+                    let response = form_text_field(ui, path, path_row_trailing_width(ui));
                     if !path.trim().is_empty() {
                         response.on_hover_text(path.clone());
                     }
@@ -773,8 +769,12 @@ impl QsrlDesktopApp {
                     {
                         *path = selected.display().to_string();
                     }
-                    if recipient_count > 1 && ui.button("Remove").clicked() {
-                        remove_index = Some(index);
+                    if recipient_count > 1 {
+                        if action_button(ui, "Remove").clicked() {
+                            remove_index = Some(index);
+                        }
+                    } else {
+                        ui.allocate_space(egui::vec2(FORM_COPY_BUTTON_WIDTH, FORM_ROW_HEIGHT));
                     }
                 });
             }
@@ -824,7 +824,7 @@ impl QsrlDesktopApp {
                 "Output root",
                 &mut self.keygen_form.output_root,
             );
-            metadata_path_row(
+            readonly_path_form_row(
                 ui,
                 "Keys folder",
                 &PathBuf::from(self.keygen_form.output_root.trim()).join("keys"),
@@ -1218,6 +1218,13 @@ fn browse_button(ui: &mut egui::Ui) -> egui::Response {
     )
 }
 
+fn action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add_sized(
+        [FORM_COPY_BUTTON_WIDTH, FORM_ROW_HEIGHT],
+        egui::Button::new(label),
+    )
+}
+
 fn metadata_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
         form_label(ui, label);
@@ -1230,6 +1237,33 @@ fn metadata_path_row(ui: &mut egui::Ui, label: &str, path: &Path) {
         form_label(ui, label);
         hover_copy_value(ui, &path.display().to_string(), true);
     });
+}
+
+fn readonly_path_form_row(ui: &mut egui::Ui, label: &str, path: &Path) {
+    let value = path.display().to_string();
+    ui.horizontal(|ui| {
+        form_label(ui, label);
+        readonly_form_value(ui, &value, true, path_row_trailing_width(ui));
+        ui.allocate_space(egui::vec2(FORM_BROWSE_BUTTON_WIDTH, FORM_ROW_HEIGHT));
+        copy_path_button(ui, &value);
+    });
+}
+
+fn readonly_form_value(ui: &mut egui::Ui, value: &str, monospace: bool, trailing_width: f32) {
+    let value_width = responsive_field_width(ui, trailing_width);
+    let available_chars = (value_width / 8.0).floor() as usize;
+    let shortened = shorten_middle(value, available_chars.clamp(8, 72));
+    let text = if monospace {
+        RichText::new(shortened).monospace()
+    } else {
+        RichText::new(shortened)
+    };
+    let response = ui
+        .add_sized([value_width, FORM_ROW_HEIGHT], egui::Label::new(text))
+        .on_hover_text(value.to_string());
+    if response.double_clicked() {
+        ui.ctx().copy_text(value.to_string());
+    }
 }
 
 fn enum_combo<T>(ui: &mut egui::Ui, label: &str, value: &mut T, options: &[(T, &str)])
