@@ -9,7 +9,7 @@ use qsrl::commands::{
 };
 #[cfg(feature = "liboqs-backend")]
 use qsrl::commands::{
-    extract_archive_with_recipient, pack_archive_with_recipients, recipient_keygen,
+    extract_archive_with_recipient, inspect_archive, pack_archive_with_recipients, recipient_keygen,
 };
 use qsrl::error::QsrlError;
 #[cfg(feature = "liboqs-backend")]
@@ -538,6 +538,12 @@ fn encrypted_archive_detached_signature_extract_round_trip() {
     let verify_output = verify_archive(&archive, &signature_public_key, Some(&detached_signature))
         .expect("verify detached signature");
     assert!(verify_output.contains("signature: ok"));
+    assert!(verify_output.contains("placement: detached"));
+
+    let inspect_output = inspect_archive(&archive).expect("inspect detached-signed archive");
+    assert!(inspect_output.contains("signature placement: none"));
+    assert!(inspect_output.contains("signature status: no embedded signature"));
+    assert!(!inspect_output.contains("signature placement: embedded"));
 
     let extract_output = extract_archive_with_recipient(
         &archive,

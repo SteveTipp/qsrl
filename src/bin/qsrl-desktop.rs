@@ -573,7 +573,7 @@ impl QsrlDesktopApp {
                                         format!(
                                             "Signature: {} / {}",
                                             report.signature_algorithm.as_str(),
-                                            report.signature_placement.as_str()
+                                            &report.signature_placement
                                         ),
                                         format!(
                                             "Encryption: {}",
@@ -944,7 +944,7 @@ impl QsrlDesktopApp {
             metadata_row(ui, "Signature", &report.signature_status);
             metadata_row(ui, "File hashes", &report.file_hash_status);
             metadata_row(ui, "Files checked", &report.files_checked.to_string());
-            metadata_row(ui, "Placement", report.placement.as_str());
+            metadata_row(ui, "Placement", &report.placement);
             metadata_row(ui, "Algorithm", report.algorithm.as_str());
         }
     }
@@ -1043,11 +1043,7 @@ impl QsrlDesktopApp {
                 "Signature algorithm",
                 report.signature_algorithm.as_str(),
             );
-            metadata_row(
-                ui,
-                "Signature placement",
-                report.signature_placement.as_str(),
-            );
+            metadata_row(ui, "Signature placement", &report.signature_placement);
             metadata_row(ui, "Signature scope", &report.signature_scope);
             metadata_row(ui, "Manifest encoding", report.manifest_encoding.as_str());
             metadata_row(

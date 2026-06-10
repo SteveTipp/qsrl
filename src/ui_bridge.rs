@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::archive::{Archive, default_detached_signature_path};
+use crate::archive::Archive;
 use crate::commands::{
-    self, SettingsOverrides, extract_archive_with_recipient, keygen, pack_archive_with_recipients,
-    recipient_keygen, sign_archive, verify_archive_signature,
+    self, SettingsOverrides, extract_archive_with_recipient, inspect_signature_state, keygen,
+    pack_archive_with_recipients, recipient_keygen, sign_archive, signature_report_placement,
+    verify_archive_signature,
 };
 use crate::error::{QsrlError, Result};
 use crate::protocol::{
@@ -79,7 +80,7 @@ pub struct VerifyReport {
     pub signature_status: String,
     pub file_hash_status: String,
     pub files_checked: usize,
-    pub placement: SignaturePlacement,
+    pub placement: String,
     pub algorithm: SignatureAlgorithm,
     pub log: String,
 }
@@ -97,7 +98,7 @@ pub struct InspectReport {
     pub archive_path: PathBuf,
     pub format_version: u16,
     pub signature_algorithm: SignatureAlgorithm,
-    pub signature_placement: SignaturePlacement,
+    pub signature_placement: String,
     pub signature_scope: String,
     pub manifest_encoding: ManifestEncoding,
     pub compression_mode: CompressionMode,
@@ -251,6 +252,13 @@ pub fn verify_report(request: &VerifyRequest) -> Result<VerifyReport> {
         &request.public_key_path,
         request.signature_path.as_deref(),
     )?;
+    let placement = signature_report_placement(
+        &archive,
+        &request.archive_path,
+        request.signature_path.as_deref(),
+    )
+    .as_str()
+    .to_string();
     let file_hash_status = if archive.is_encrypted() {
         "signature only; encrypted payload not authenticated until decrypt/extract".to_string()
     } else {
@@ -263,7 +271,7 @@ pub fn verify_report(request: &VerifyRequest) -> Result<VerifyReport> {
             request.archive_path.display(),
             signature_status,
             archive.manifest.files.len(),
-            archive.manifest.signature_placement.as_str(),
+            placement,
             archive.manifest.signature_algorithm.as_str(),
         )
     } else {
@@ -272,7 +280,7 @@ pub fn verify_report(request: &VerifyRequest) -> Result<VerifyReport> {
             request.archive_path.display(),
             signature_status,
             archive.manifest.files.len(),
-            archive.manifest.signature_placement.as_str(),
+            placement,
             archive.manifest.signature_algorithm.as_str(),
         )
     };
@@ -282,7 +290,7 @@ pub fn verify_report(request: &VerifyRequest) -> Result<VerifyReport> {
         signature_status,
         file_hash_status,
         files_checked: archive.manifest.files.len(),
-        placement: archive.manifest.signature_placement,
+        placement,
         algorithm: archive.manifest.signature_algorithm,
         log,
     })
@@ -291,19 +299,7 @@ pub fn verify_report(request: &VerifyRequest) -> Result<VerifyReport> {
 pub fn inspect_report(request: &InspectRequest) -> Result<InspectReport> {
     validate_inspect_request(request)?;
     let archive = Archive::read_from_path(&request.archive_path)?;
-    let detached_path = default_detached_signature_path(&request.archive_path);
-    let detached_present = archive.manifest.signature_placement == SignaturePlacement::Detached
-        && detached_path.exists();
-    let signature_status = match archive.manifest.signature_placement {
-        SignaturePlacement::Embedded if archive.signature.is_some() => {
-            "embedded signature present".to_string()
-        }
-        SignaturePlacement::Embedded => "embedded signature missing".to_string(),
-        SignaturePlacement::Detached if detached_present => {
-            "detached signature present".to_string()
-        }
-        SignaturePlacement::Detached => "detached signature not found".to_string(),
-    };
+    let signature_state = inspect_signature_state(&archive, &request.archive_path);
     let files = archive
         .manifest
         .files
@@ -321,7 +317,7 @@ pub fn inspect_report(request: &InspectRequest) -> Result<InspectReport> {
         archive_path: request.archive_path.clone(),
         format_version: archive.manifest.format_version,
         signature_algorithm: archive.manifest.signature_algorithm,
-        signature_placement: archive.manifest.signature_placement,
+        signature_placement: signature_state.placement.as_str().to_string(),
         signature_scope: archive.manifest.signature_scope.as_str().to_string(),
         manifest_encoding: archive.manifest.manifest_encoding,
         compression_mode: archive.manifest.compression_mode,
@@ -340,7 +336,7 @@ pub fn inspect_report(request: &InspectRequest) -> Result<InspectReport> {
             .encryption
             .as_ref()
             .map(|section| section.aead_algorithm.as_str().to_string()),
-        signature_status,
+        signature_status: signature_state.status.to_string(),
         files,
         log,
     })
@@ -397,7 +393,7 @@ fn generated_key_path(log: &str, prefix: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::pack_archive;
+    use crate::commands::{keygen, pack_archive, sign_archive};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -464,7 +460,111 @@ mod tests {
         assert_eq!(report.format_version, 1);
         assert_eq!(report.files.len(), 1);
         assert!(!report.encrypted);
+        assert_eq!(report.signature_placement, "none");
+        assert_eq!(report.signature_status, "no embedded signature");
+        assert!(report.log.contains("signature placement: none"));
         assert_eq!(report.files[0].path, "hello.txt");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspect_report_reports_embedded_signature_when_present() {
+        let root = temp_root("inspect-embedded");
+        let input = root.join("input");
+        let archive_path = root.join("embedded.qsrl");
+        fs::create_dir_all(&input).expect("create input");
+        fs::write(input.join("hello.txt"), b"hello qsrl").expect("write sample file");
+        keygen(&root, SignatureAlgorithm::MlDsa).expect("generate key");
+        let private_key = root.join("keys").join("ml-dsa-001.private");
+
+        pack_archive(&root, &input, &archive_path, SettingsOverrides::default())
+            .expect("pack archive");
+        sign_archive(
+            &archive_path,
+            &private_key,
+            Some(SignaturePlacement::Embedded),
+            None,
+        )
+        .expect("sign archive");
+
+        let report = inspect_report(&InspectRequest {
+            archive_path: archive_path.clone(),
+        })
+        .expect("inspect report");
+
+        assert_eq!(report.signature_placement, "embedded");
+        assert_eq!(report.signature_status, "embedded signature present");
+        assert!(report.log.contains("signature placement: embedded"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verify_report_reports_embedded_signature_when_used() {
+        let root = temp_root("verify-embedded");
+        let input = root.join("input");
+        let archive_path = root.join("embedded.qsrl");
+        fs::create_dir_all(&input).expect("create input");
+        fs::write(input.join("hello.txt"), b"hello qsrl").expect("write sample file");
+        keygen(&root, SignatureAlgorithm::MlDsa).expect("generate key");
+        let private_key = root.join("keys").join("ml-dsa-001.private");
+        let public_key = root.join("keys").join("ml-dsa-001.public");
+
+        pack_archive(&root, &input, &archive_path, SettingsOverrides::default())
+            .expect("pack archive");
+        sign_archive(
+            &archive_path,
+            &private_key,
+            Some(SignaturePlacement::Embedded),
+            None,
+        )
+        .expect("sign archive");
+
+        let report = verify_report(&VerifyRequest {
+            archive_path: archive_path.clone(),
+            public_key_path: public_key,
+            signature_path: None,
+        })
+        .expect("verify report");
+
+        assert_eq!(report.placement, "embedded");
+        assert!(report.log.contains("placement: embedded"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verify_report_reports_explicit_detached_signature_when_used() {
+        let root = temp_root("verify-detached");
+        let input = root.join("input");
+        let archive_path = root.join("detached.qsrl");
+        let detached_signature = root.join("detached.sig");
+        fs::create_dir_all(&input).expect("create input");
+        fs::write(input.join("hello.txt"), b"hello qsrl").expect("write sample file");
+        keygen(&root, SignatureAlgorithm::MlDsa).expect("generate key");
+        let private_key = root.join("keys").join("ml-dsa-001.private");
+        let public_key = root.join("keys").join("ml-dsa-001.public");
+
+        pack_archive(&root, &input, &archive_path, SettingsOverrides::default())
+            .expect("pack archive");
+        sign_archive(
+            &archive_path,
+            &private_key,
+            Some(SignaturePlacement::Detached),
+            Some(&detached_signature),
+        )
+        .expect("sign archive");
+
+        let report = verify_report(&VerifyRequest {
+            archive_path: archive_path.clone(),
+            public_key_path: public_key,
+            signature_path: Some(detached_signature),
+        })
+        .expect("verify report");
+
+        assert_eq!(report.placement, "detached");
+        assert!(report.log.contains("placement: detached"));
 
         let _ = fs::remove_dir_all(root);
     }

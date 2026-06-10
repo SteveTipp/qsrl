@@ -254,6 +254,7 @@ pub fn verify_archive(
     let archive = Archive::read_from_path(archive_path)?;
     let signature_status =
         verify_archive_signature(&archive, archive_path, public_key_path, signature_path)?;
+    let signature_placement = signature_report_placement(&archive, archive_path, signature_path);
     let file_hash_status: String = if archive.is_encrypted() {
         "file hashes: signature only; encrypted payload not authenticated until decrypt/extract"
             .into()
@@ -268,7 +269,7 @@ pub fn verify_archive(
         signature_status,
         file_hash_status,
         archive.manifest.files.len(),
-        archive.manifest.signature_placement.as_str(),
+        signature_placement.as_str(),
         archive.manifest.signature_algorithm.as_str(),
     ))
 }
@@ -360,15 +361,7 @@ pub fn extract_archive_with_recipient(
 
 pub fn inspect_archive(archive_path: &Path) -> Result<String> {
     let archive = Archive::read_from_path(archive_path)?;
-    let detached_path = default_detached_signature_path(archive_path);
-    let detached_present = archive.manifest.signature_placement == SignaturePlacement::Detached
-        && detached_path.exists();
-    let signature_status = match archive.manifest.signature_placement {
-        SignaturePlacement::Embedded if archive.signature.is_some() => "embedded signature present",
-        SignaturePlacement::Embedded => "embedded signature missing",
-        SignaturePlacement::Detached if detached_present => "detached signature present",
-        SignaturePlacement::Detached => "detached signature not found",
-    };
+    let signature_state = inspect_signature_state(&archive, archive_path);
 
     let mut output = String::new();
     output.push_str(&format!("archive: {}\n", archive_path.display()));
@@ -382,7 +375,7 @@ pub fn inspect_archive(archive_path: &Path) -> Result<String> {
     ));
     output.push_str(&format!(
         "signature placement: {}\n",
-        archive.manifest.signature_placement.as_str()
+        signature_state.placement.as_str()
     ));
     output.push_str(&format!(
         "signature scope: {}\n",
@@ -416,7 +409,7 @@ pub fn inspect_archive(archive_path: &Path) -> Result<String> {
     } else {
         output.push_str("encryption: none\n");
     }
-    output.push_str(&format!("signature status: {signature_status}\n"));
+    output.push_str(&format!("signature status: {}\n", signature_state.status));
     output.push_str(&format!("files: {}\n", archive.manifest.files.len()));
     for entry in &archive.manifest.files {
         output.push_str(&format!(
@@ -794,6 +787,78 @@ fn decrypt_archive_payload(archive: &Archive, recipient_key_path: &Path) -> Resu
         &archive.payload,
         &encryption.payload_tag,
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SignatureReportPlacement {
+    Embedded,
+    Detached,
+    None,
+}
+
+impl SignatureReportPlacement {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Detached => "detached",
+            Self::None => "none",
+        }
+    }
+}
+
+pub(crate) struct SignatureInspectState {
+    pub(crate) placement: SignatureReportPlacement,
+    pub(crate) status: &'static str,
+}
+
+pub(crate) fn signature_report_placement(
+    archive: &Archive,
+    archive_path: &Path,
+    signature_path: Option<&Path>,
+) -> SignatureReportPlacement {
+    if signature_path.is_some() {
+        SignatureReportPlacement::Detached
+    } else if archive.signature.is_some() {
+        SignatureReportPlacement::Embedded
+    } else if archive.manifest.signature_placement == SignaturePlacement::Detached
+        || default_detached_signature_path(archive_path).exists()
+    {
+        SignatureReportPlacement::Detached
+    } else {
+        SignatureReportPlacement::None
+    }
+}
+
+pub(crate) fn inspect_signature_state(
+    archive: &Archive,
+    archive_path: &Path,
+) -> SignatureInspectState {
+    if archive.signature.is_some() {
+        SignatureInspectState {
+            placement: SignatureReportPlacement::Embedded,
+            status: "embedded signature present",
+        }
+    } else if archive.manifest.signature_placement == SignaturePlacement::Detached {
+        let status = if default_detached_signature_path(archive_path).exists() {
+            "detached signature present"
+        } else {
+            "detached signature not found"
+        };
+        SignatureInspectState {
+            placement: SignatureReportPlacement::Detached,
+            status,
+        }
+    } else if default_detached_signature_path(archive_path).exists() {
+        SignatureInspectState {
+            placement: SignatureReportPlacement::Detached,
+            status: "detached signature present",
+        }
+    } else {
+        SignatureInspectState {
+            placement: SignatureReportPlacement::None,
+            status: "no embedded signature",
+        }
+    }
 }
 
 pub(crate) fn verify_archive_signature(
