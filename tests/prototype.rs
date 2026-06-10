@@ -470,6 +470,180 @@ fn encrypted_archive_creation_and_decrypt_extract_round_trip() {
 
 #[cfg(feature = "liboqs-backend")]
 #[test]
+fn encrypted_archive_extract_without_signature_check_round_trip() {
+    let root = fresh_temp_dir("encrypted-no-signature-check");
+    let input = write_sample_input(&root);
+    let archive = root.join("encrypted-no-signature-check.qsrl");
+    let output = root.join("decrypted");
+
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    let recipient_private_key = root.join("keys").join("ml-kem-001.private");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted archive");
+
+    let extract_output =
+        extract_archive_with_recipient(&archive, &output, None, None, Some(&recipient_private_key))
+            .expect("decrypt and extract archive");
+    assert!(extract_output.contains("encryption: decrypted"));
+    assert_eq!(read_tree(&input), read_tree(&output));
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
+fn encrypted_archive_detached_signature_extract_round_trip() {
+    let root = fresh_temp_dir("encrypted-detached-extract");
+    let input = write_sample_input(&root);
+    let archive = root.join("encrypted-detached.qsrl");
+    let output = root.join("decrypted");
+    let detached_signature = root.join("encrypted-detached.sig");
+
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate signature key");
+    let recipient_private_key = root.join("keys").join("ml-kem-001.private");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+    let signature_private_key = root.join("keys").join("ml-dsa-001.private");
+    let signature_public_key = root.join("keys").join("ml-dsa-001.public");
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted archive");
+    let archive_bytes_before_sign = fs::read(&archive).expect("read encrypted archive bytes");
+
+    let sign_output = sign_archive(
+        &archive,
+        &signature_private_key,
+        Some(SignaturePlacement::Detached),
+        Some(&detached_signature),
+    )
+    .expect("sign encrypted archive with detached signature");
+    assert!(sign_output.contains("archive unchanged"));
+    assert_eq!(
+        archive_bytes_before_sign,
+        fs::read(&archive).expect("read signed archive bytes")
+    );
+
+    let verify_output = verify_archive(&archive, &signature_public_key, Some(&detached_signature))
+        .expect("verify detached signature");
+    assert!(verify_output.contains("signature: ok"));
+
+    let extract_output = extract_archive_with_recipient(
+        &archive,
+        &output,
+        Some(&signature_public_key),
+        Some(&detached_signature),
+        Some(&recipient_private_key),
+    )
+    .expect("decrypt and extract detached-signed archive");
+    assert!(extract_output.contains("signature: ok"));
+    assert!(extract_output.contains("encryption: decrypted"));
+    assert_eq!(read_tree(&input), read_tree(&output));
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
+fn encrypted_archive_detached_signature_rejects_wrong_public_key() {
+    let root = fresh_temp_dir("encrypted-detached-wrong-pubkey");
+    let input = write_sample_input(&root);
+    let archive = root.join("encrypted-detached-wrong-pubkey.qsrl");
+    let output = root.join("decrypted");
+    let detached_signature = root.join("encrypted-detached-wrong-pubkey.sig");
+
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate first signature key");
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate second signature key");
+    let recipient_private_key = root.join("keys").join("ml-kem-001.private");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+    let signature_private_key = root.join("keys").join("ml-dsa-001.private");
+    let wrong_signature_public_key = root.join("keys").join("ml-dsa-002.public");
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted archive");
+    sign_archive(
+        &archive,
+        &signature_private_key,
+        Some(SignaturePlacement::Detached),
+        Some(&detached_signature),
+    )
+    .expect("sign encrypted archive with detached signature");
+
+    let error = extract_archive_with_recipient(
+        &archive,
+        &output,
+        Some(&wrong_signature_public_key),
+        Some(&detached_signature),
+        Some(&recipient_private_key),
+    )
+    .expect_err("extract should reject wrong signature public key");
+    assert!(matches!(error, QsrlError::SignatureVerificationFailed(_)));
+    assert!(!output.exists());
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
+fn encrypted_archive_detached_signature_rejects_wrong_recipient_key() {
+    let root = fresh_temp_dir("encrypted-detached-wrong-recipient");
+    let input = write_sample_input(&root);
+    let archive = root.join("encrypted-detached-wrong-recipient.qsrl");
+    let output = root.join("decrypted");
+    let detached_signature = root.join("encrypted-detached-wrong-recipient.sig");
+
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate recipient key");
+    recipient_keygen(&root, KemAlgorithm::MlKem).expect("generate extra recipient key");
+    keygen(&root, SignatureAlgorithm::MlDsa).expect("generate signature key");
+    let recipient_public_key = root.join("keys").join("ml-kem-001.public");
+    let wrong_recipient_private_key = root.join("keys").join("ml-kem-002.private");
+    let signature_private_key = root.join("keys").join("ml-dsa-001.private");
+    let signature_public_key = root.join("keys").join("ml-dsa-001.public");
+
+    pack_archive_with_recipients(
+        &root,
+        &input,
+        &archive,
+        SettingsOverrides::default(),
+        std::slice::from_ref(&recipient_public_key),
+    )
+    .expect("pack encrypted archive");
+    sign_archive(
+        &archive,
+        &signature_private_key,
+        Some(SignaturePlacement::Detached),
+        Some(&detached_signature),
+    )
+    .expect("sign encrypted archive with detached signature");
+
+    let error = extract_archive_with_recipient(
+        &archive,
+        &output,
+        Some(&signature_public_key),
+        Some(&detached_signature),
+        Some(&wrong_recipient_private_key),
+    )
+    .expect_err("extract should reject wrong recipient key");
+    assert!(matches!(error, QsrlError::KeyRejected(_)));
+    assert!(!output.exists());
+}
+
+#[cfg(feature = "liboqs-backend")]
+#[test]
 fn wrong_recipient_key_is_rejected() {
     let root = fresh_temp_dir("wrong-recipient");
     let input = write_sample_input(&root);

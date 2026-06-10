@@ -173,7 +173,11 @@ pub fn sign_archive(
     }
 
     let placement = placement_override.unwrap_or(archive.manifest.signature_placement);
-    archive.set_signature_placement(placement)?;
+    let preserve_encrypted_archive_bytes =
+        archive.is_encrypted() && placement == SignaturePlacement::Detached;
+    if !preserve_encrypted_archive_bytes {
+        archive.set_signature_placement(placement)?;
+    }
     let signed_payload = archive.signed_payload()?;
     let signature_bytes = sign_message(&private_key, &signed_payload)?;
     let signature = SignatureRecord {
@@ -208,7 +212,9 @@ pub fn sign_archive(
             ))
         }
         SignaturePlacement::Detached => {
-            archive.write_to_path(archive_path)?;
+            if !preserve_encrypted_archive_bytes {
+                archive.write_to_path(archive_path)?;
+            }
             let output_path = signature_path
                 .map(PathBuf::from)
                 .unwrap_or_else(|| default_detached_signature_path(archive_path));
@@ -219,10 +225,18 @@ pub fn sign_archive(
                     err,
                 )
             })?;
+            let archive_status = if preserve_encrypted_archive_bytes {
+                format!(
+                    "archive unchanged to preserve encrypted payload authentication data: {}",
+                    archive_path.display()
+                )
+            } else {
+                format!("archive updated: {}", archive_path.display())
+            };
             Ok(format!(
-                "wrote detached signature {}\narchive updated: {}\nsigned payload bytes: {}\nkey uses recorded: {}\nbackend: {}{}",
+                "wrote detached signature {}\n{}\nsigned payload bytes: {}\nkey uses recorded: {}\nbackend: {}{}",
                 output_path.display(),
-                archive_path.display(),
+                archive_status,
                 signed_payload.len(),
                 private_key.uses,
                 private_key.implementation_label(),
@@ -291,6 +305,7 @@ pub fn extract_archive_with_recipient(
         )?)
     } else if archive.signature.is_some()
         || archive.manifest.signature_placement == SignaturePlacement::Detached
+        || signature_path.is_some()
     {
         Some("signature: not checked (no --pubkey provided)".into())
     } else {
@@ -836,26 +851,48 @@ fn load_signature_record(
     archive_path: &Path,
     signature_path: Option<&Path>,
 ) -> Result<SignatureRecord> {
+    if let Some(path) = signature_path {
+        return load_detached_signature_record(path);
+    }
+
     match archive.manifest.signature_placement {
-        SignaturePlacement::Embedded => archive.signature.clone().ok_or_else(|| {
-            QsrlError::MissingSignature("embedded signature block is missing".into())
-        }),
+        SignaturePlacement::Embedded => {
+            if let Some(signature) = archive.signature.clone() {
+                Ok(signature)
+            } else {
+                let path = default_detached_signature_path(archive_path);
+                if path.exists() {
+                    load_detached_signature_record(&path)
+                } else {
+                    Err(QsrlError::MissingSignature(
+                        "embedded signature block is missing".into(),
+                    ))
+                }
+            }
+        }
         SignaturePlacement::Detached => {
-            let path = signature_path
-                .map(PathBuf::from)
-                .unwrap_or_else(|| default_detached_signature_path(archive_path));
+            let path = default_detached_signature_path(archive_path);
             if !path.exists() {
                 return Err(QsrlError::MissingSignature(format!(
                     "detached signature file not found at {}",
                     path.display()
                 )));
             }
-            SignatureRecord::deserialize(
-                &fs::read(&path)
-                    .map_err(|err| QsrlError::io(format!("reading {}", path.display()), err))?,
-            )
+            load_detached_signature_record(&path)
         }
     }
+}
+
+fn load_detached_signature_record(path: &Path) -> Result<SignatureRecord> {
+    if !path.exists() {
+        return Err(QsrlError::MissingSignature(format!(
+            "detached signature file not found at {}",
+            path.display()
+        )));
+    }
+    SignatureRecord::deserialize(
+        &fs::read(path).map_err(|err| QsrlError::io(format!("reading {}", path.display()), err))?,
+    )
 }
 
 fn planned_output_paths(archive: &Archive, output_dir: &Path) -> Result<Vec<PathBuf>> {
